@@ -77,7 +77,7 @@ Build a macOS DMG artifact:
 ./scripts/build-macos-artifact .work/zed aarch64-apple-darwin
 ```
 
-The wrapper copies Zed's generated `Zed-aarch64.dmg` to `artifacts/Zedha-aarch64.dmg` for distribution workflow artifacts.
+The wrapper copies the generated `Zedha-aarch64.dmg` to `artifacts/Zedha-aarch64.dmg` for distribution workflow artifacts.
 
 For local development, you can point `fetch-upstream` at an existing Zed checkout:
 
@@ -89,11 +89,19 @@ ZEDHA_UPSTREAM_REPO=~/github/zed ./scripts/fetch-upstream
 
 The normal Zed checkout remains the ergonomic place to develop changes. Once a downstream change is ready, export it as a patch and copy it into `patches/`.
 
-Example:
+The patch set is intentionally grouped by concern rather than development
+history:
+
+```text
+0001-terminal-launcher.patch  final launcher diff from the personal Zed fork
+0002-brand-as-zedha.patch     independent product and distribution identity
+```
+
+Example launcher refresh:
 
 ```bash
-git -C ~/github/zed format-patch --no-stat --no-signature \
-  --output-directory ~/github/zedha/patches v1.7.2..patched-main
+git -C ~/github/zed diff --binary --full-index v1.12.0..patched-main \
+  > ~/github/zedha/patches/0001-terminal-launcher.patch
 ```
 
 Keep behavior patches separate from product identity and update-feed patches so upstream conflicts are easier to review.

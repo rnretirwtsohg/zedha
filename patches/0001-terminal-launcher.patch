@@ -1,0 +1,2699 @@
+From 5f80ea10a35c59bf7714e8fe33b0beb6b38f99ad Mon Sep 17 00:00:00 2001
+From: Naresh <ghostwriternr@gmail.com>
+Date: Fri, 24 Jul 2026 19:17:10 +0100
+Subject: [PATCH] terminal: Add native launcher integration
+
+Squash the final terminal-launcher implementation carried by the personal
+Zed fork on top of upstream v1.12.0. The source history is preserved in:
+
+- 9f491765e5 terminal: Define launcher protocol
+- dbb45fbcbc terminal: Own launcher context per panel
+- c078c47834 terminal: Propagate launcher context
+- 2e806213ad terminal: Address launcher review findings
+- e6d4c269e4 terminal: Silence launcher dead_code warnings
+- 94872e45fb agent: Propagate launcher env to terminals
+- de77221598 workspace: Signal panel initialization
+- 49dea5f5c0 terminal: Define idempotent launcher methods
+- 5f80ea10a3 terminal: Reuse launcher tabs by session
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 79664e0cfd39552f45771b642505bcdec502d8d4..6db5334868b8eb8c2ab5c4eb150a8e73bc9ba2bf 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -18494,6 +18494,7 @@ dependencies = [
+  "language",
+  "log",
+  "menu",
++ "net",
+  "pretty_assertions",
+  "project",
+  "regex",
+@@ -18508,11 +18509,13 @@ dependencies = [
+  "shellexpand",
+  "shlex",
+  "task",
++ "tempfile",
+  "terminal",
+  "theme",
+  "theme_settings",
+  "ui",
+  "util",
++ "uuid",
+  "workspace",
+  "zed_actions",
+ ]
+diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
+index 11d0986603e00a73467c0962ebe381aed4a57f92..7813047c8da8f6aeece8be781d51a3dc89f69bc7 100644
+--- a/crates/agent_ui/src/agent_panel.rs
++++ b/crates/agent_ui/src/agent_panel.rs
+@@ -2039,14 +2039,17 @@ impl AgentPanel {
+     ) {
+         let terminal_working_directory = working_directory.clone();
+         let init_command = Self::terminal_init_command(run_init_command, cx);
+-        let terminal_task = self.project.update(cx, |project, cx| {
+-            project.create_terminal_shell(working_directory, cx)
+-        });
++        let terminal_project = self.project.clone();
+         let workspace = self.workspace.clone();
+         let workspace_id = self.workspace_id;
+         let project = self.project.downgrade();
+ 
+         cx.spawn_in(window, async move |this, cx| {
++            let terminal_control_env =
++                terminal_view::terminal_control_env_for_workspace(&workspace, cx).await;
++            let terminal_task = terminal_project.update(cx, |project, cx| {
++                project.create_terminal_shell(working_directory, terminal_control_env, cx)
++            });
+             let terminal = match terminal_task.await {
+                 Ok(terminal) => terminal,
+                 Err(error) => {
+@@ -7456,6 +7459,7 @@ mod tests {
+         let (panel, mut cx) = setup_panel(cx).await;
+         cx.executor().allow_parking();
+         cx.update(|_, cx| {
++            terminal_view::init(cx);
+             let mut settings = AgentSettings::get_global(cx).clone();
+             // `init_ran_42` is the command's output, not its echoed text, so finding
+             // it proves the shell executed the command rather than just echoing it.
+@@ -7467,6 +7471,13 @@ mod tests {
+             terminal_settings.shell = task::Shell::Program("/bin/sh".to_string());
+             TerminalSettings::override_global(terminal_settings, cx);
+         });
++        let workspace = panel.read_with(&cx, |panel, _| panel.workspace.upgrade().unwrap());
++        workspace.update_in(&mut cx, |workspace, window, cx| {
++            if workspace.panel::<TerminalPanel>(cx).is_none() {
++                let terminal_panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
++                workspace.add_panel(terminal_panel, window, cx);
++            }
++        });
+ 
+         let terminal_id = TerminalId::new();
+         panel.update_in(&mut cx, |panel, window, cx| {
+@@ -9100,6 +9111,79 @@ mod tests {
+         (panel, cx)
+     }
+ 
++    #[cfg(unix)]
++    #[gpui::test]
++    async fn test_agent_terminal_waits_for_workspace_terminal_control_env(cx: &mut TestAppContext) {
++        let (panel, mut cx) = setup_panel(cx).await;
++        cx.executor().allow_parking();
++        cx.update(|_, cx| {
++            terminal_view::init(cx);
++            let mut settings = AgentSettings::get_global(cx).clone();
++            settings.terminal_init_command = Some(
++                "printf 'launcher_socket=<%s>\\nlauncher_workspace=<%s>\\n' \
++                 \"$ZED_TERMINAL_CONTROL_SOCKET\" \
++                 \"$ZED_TERMINAL_CONTROL_WORKSPACE\""
++                    .to_string(),
++            );
++            AgentSettings::override_global(settings, cx);
++
++            let mut terminal_settings = TerminalSettings::get_global(cx).clone();
++            terminal_settings.shell = task::Shell::Program("/bin/sh".to_string());
++            TerminalSettings::override_global(terminal_settings, cx);
++        });
++
++        let workspace = panel.read_with(&cx, |panel, _| panel.workspace.upgrade().unwrap());
++        workspace.update_in(&mut cx, |workspace, window, cx| {
++            if let Some(existing_panel) = workspace.panel::<TerminalPanel>(cx) {
++                workspace.remove_panel::<TerminalPanel>(&existing_panel, window, cx);
++            }
++            assert!(workspace.panel::<TerminalPanel>(cx).is_none());
++        });
++        let terminal_id = TerminalId::new();
++        panel.update_in(&mut cx, |panel, window, cx| {
++            panel.spawn_terminal(
++                terminal_id,
++                None,
++                None,
++                None,
++                None,
++                true,
++                true,
++                true,
++                AgentThreadSource::AgentPanel,
++                window,
++                cx,
++            );
++        });
++        cx.run_until_parked();
++
++        // Add the terminal panel after the agent terminal spawn starts. The
++        // spawn must wait rather than capture an empty launcher environment.
++        workspace.update_in(&mut cx, |workspace, window, cx| {
++            let terminal_panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
++            workspace.add_panel(terminal_panel, window, cx);
++        });
++
++        let deadline = Instant::now() + Duration::from_secs(10);
++        loop {
++            cx.run_until_parked();
++            let content = panel.read_with(&cx, |panel, cx| {
++                panel
++                    .terminals
++                    .get(&terminal_id)
++                    .map(|terminal| terminal.view.read(cx).terminal().read(cx).get_content())
++                    .unwrap_or_default()
++            });
++            if content.matches("launcher_workspace=<").count() >= 2 {
++                assert!(!content.contains("launcher_socket=<>"), "{content}");
++                assert!(!content.contains("launcher_workspace=<>"), "{content}");
++                break;
++            }
++            assert!(Instant::now() < deadline, "terminal output: {content}");
++            cx.executor().advance_clock(Duration::from_millis(10));
++        }
++    }
++
+     async fn setup_visible_panel(
+         cx: &mut TestAppContext,
+     ) -> (Entity<AgentPanel>, VisualTestContext) {
+diff --git a/crates/project/src/terminals.rs b/crates/project/src/terminals.rs
+index 46e78e297cb38b2f4449b27f4871e877ea9f9e82..9f3d7d0d725c8438a1228634aab8795ec0057e12 100644
+--- a/crates/project/src/terminals.rs
++++ b/crates/project/src/terminals.rs
+@@ -290,9 +290,10 @@ impl Project {
+     pub fn create_terminal_shell(
+         &mut self,
+         cwd: Option<PathBuf>,
++        extra_env: HashMap<String, String>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Terminal>>> {
+-        self.create_terminal_shell_internal(cwd, false, cx)
++        self.create_terminal_shell_internal(cwd, false, extra_env, cx)
+     }
+ 
+     /// Creates a local terminal even if the project is remote.
+@@ -300,6 +301,7 @@ impl Project {
+     /// In local projects: opens in the project directory (same as regular terminals).
+     pub fn create_local_terminal(
+         &mut self,
++        extra_env: HashMap<String, String>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Terminal>>> {
+         let working_directory = if self.remote_client.is_some() {
+@@ -309,7 +311,7 @@ impl Project {
+             // Local project: use project directory like normal terminals
+             self.active_project_directory(cx).map(|p| p.to_path_buf())
+         };
+-        self.create_terminal_shell_internal(working_directory, true, cx)
++        self.create_terminal_shell_internal(working_directory, true, extra_env, cx)
+     }
+ 
+     /// Internal method for creating terminal shells.
+@@ -319,6 +321,7 @@ impl Project {
+         &mut self,
+         cwd: Option<PathBuf>,
+         force_local: bool,
++        extra_env: HashMap<String, String>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<Terminal>>> {
+         let path = cwd.map(|p| Arc::from(&*p));
+@@ -380,8 +383,8 @@ impl Project {
+         let lang_registry = self.languages.clone();
+         cx.spawn(async move |project, cx| {
+             let shell_kind = ShellKind::new(&shell, path_style.is_windows());
+-            let mut env = env_task.await.unwrap_or_default();
+-            env.extend(settings.env);
++            let env = merge_terminal_env(env_task.await.unwrap_or_default(), settings.env);
++            let env = merge_terminal_env(env, extra_env);
+ 
+             let activation_script = maybe!(async {
+                 for toolchain in toolchains {
+@@ -462,11 +465,12 @@ impl Project {
+         terminal: &Entity<Terminal>,
+         cx: &mut Context<'_, Project>,
+         cwd: Option<PathBuf>,
++        extra_env: HashMap<String, String>,
+     ) -> Task<Result<Entity<Terminal>>> {
+         // We cannot clone the task's terminal, as it will effectively re-spawn the task, which might not be desirable.
+         // For now, create a new shell instead.
+         if terminal.read(cx).task().is_some() {
+-            return self.create_terminal_shell(cwd, cx);
++            return self.create_terminal_shell(cwd, extra_env, cx);
+         }
+         let local_path = if self.is_via_remote_server() {
+             None
+@@ -474,7 +478,7 @@ impl Project {
+             cwd
+         };
+ 
+-        let builder = terminal.read(cx).clone_builder(cx, local_path);
++        let builder = terminal.read(cx).clone_builder(cx, local_path, extra_env);
+         cx.spawn(async |project, cx| {
+             let terminal = builder.await?;
+             project.update(cx, |project, cx| {
+@@ -700,6 +704,14 @@ fn quote_prepared_task_arg_for_activation<'a>(
+     shell_kind.try_quote(arg)
+ }
+ 
++fn merge_terminal_env(
++    mut base: HashMap<String, String>,
++    extra: HashMap<String, String>,
++) -> HashMap<String, String> {
++    base.extend(extra);
++    base
++}
++
+ fn quote_cmd_command_arg_for_outer_shell(arg: &str, shell_kind: ShellKind) -> Option<String> {
+     match shell_kind {
+         ShellKind::PowerShell | ShellKind::Pwsh => Some(format!("'{}'", arg.replace('\'', "''"))),
+@@ -720,6 +732,22 @@ mod tests {
+     use super::*;
+     use pretty_assertions::assert_eq;
+ 
++    #[test]
++    fn extra_terminal_env_overrides_base_values() {
++        let base = HashMap::from_iter([
++            ("KEEP".into(), "yes".into()),
++            ("ZED_TERMINAL_CONTROL_WORKSPACE".into(), "stale".into()),
++        ]);
++        let extra =
++            HashMap::from_iter([("ZED_TERMINAL_CONTROL_WORKSPACE".into(), "panel-a".into())]);
++        let merged = merge_terminal_env(base, extra);
++        assert_eq!(merged.get("KEEP"), Some(&"yes".into()));
++        assert_eq!(
++            merged.get("ZED_TERMINAL_CONTROL_WORKSPACE"),
++            Some(&"panel-a".into()),
++        );
++    }
++
+     fn prepared_cmd_task(command_arg: &str) -> SpawnInTerminal {
+         SpawnInTerminal {
+             command: Some("cmd.exe".to_string()),
+diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
+index a1e1c1c937e6585f11f8ab7a1909c77cc1553a91..0c2dc2822d3ca4f442164091e2702086d25a5a7f 100644
+--- a/crates/terminal/src/terminal.rs
++++ b/crates/terminal/src/terminal.rs
+@@ -2910,13 +2910,20 @@ impl Terminal {
+         self.vi_mode_enabled
+     }
+ 
+-    pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
++    pub fn clone_builder(
++        &self,
++        cx: &App,
++        cwd: Option<PathBuf>,
++        extra_env: HashMap<String, String>,
++    ) -> Task<Result<TerminalBuilder>> {
+         let working_directory = self.working_directory().or_else(|| cwd);
++        let mut env = self.template.env.clone();
++        env.extend(extra_env);
+         TerminalBuilder::new(
+             working_directory,
+             None,
+             self.template.shell.clone(),
+-            self.template.env.clone(),
++            env,
+             self.template.cursor_shape,
+             self.template.alternate_scroll,
+             self.template.max_scroll_history_lines,
+diff --git a/crates/terminal_view/Cargo.toml b/crates/terminal_view/Cargo.toml
+index 5197dee517a0685a9f4996a1a688321374a3f0bd..61c878fae4a922a0f0508bdea458907946b75544 100644
+--- a/crates/terminal_view/Cargo.toml
++++ b/crates/terminal_view/Cargo.toml
+@@ -29,6 +29,7 @@ itertools.workspace = true
+ language.workspace = true
+ log.workspace = true
+ menu.workspace = true
++net.workspace = true
+ pretty_assertions.workspace = true
+ project.workspace = true
+ regex.workspace = true
+@@ -40,11 +41,13 @@ serde_json.workspace = true
+ settings.workspace = true
+ shellexpand.workspace = true
+ shlex.workspace = true
++tempfile.workspace = true
+ terminal.workspace = true
+ theme.workspace = true
+ theme_settings.workspace = true
+ ui.workspace = true
+ util.workspace = true
++uuid.workspace = true
+ workspace.workspace = true
+ zed_actions.workspace = true
+ 
+diff --git a/crates/terminal_view/src/persistence.rs b/crates/terminal_view/src/persistence.rs
+index 5c1e659b0f30bf76149e61e742826b5e817fda86..86ca7784161bff52e97d99f2f3545c5783913bf6 100644
+--- a/crates/terminal_view/src/persistence.rs
++++ b/crates/terminal_view/src/persistence.rs
+@@ -1,6 +1,6 @@
+ use anyhow::Result;
+ use async_recursion::async_recursion;
+-use collections::HashSet;
++use collections::{HashMap, HashSet};
+ use futures::future::join_all;
+ use gpui::{AppContext as _, AsyncWindowContext, Axis, Entity, Task, WeakEntity};
+ use project::Project;
+@@ -15,8 +15,7 @@ use db::{
+     sqlez_macros::sql,
+ };
+ use workspace::{
+-    ItemHandle, ItemId, Member, Pane, PaneAxis, PaneGroup, SerializableItem as _, Workspace,
+-    WorkspaceDb, WorkspaceId,
++    ItemHandle, ItemId, Member, Pane, PaneAxis, PaneGroup, Workspace, WorkspaceDb, WorkspaceId,
+ };
+ 
+ use crate::{
+@@ -101,11 +100,14 @@ pub(crate) fn deserialize_terminal_panel(
+         })?;
+         match &serialized_panel.items {
+             SerializedItems::NoSplits(item_ids) => {
++                let extra_env =
++                    terminal_panel.read_with(cx, |panel, _| panel.terminal_control_env());
+                 let items = deserialize_terminal_views(
+                     database_id,
+                     project,
+                     workspace,
+                     item_ids.as_slice(),
++                    extra_env,
+                     cx,
+                 )
+                 .await;
+@@ -221,15 +223,18 @@ async fn deserialize_pane_group(
+                 .log_err()?;
+             let active_item = serialized_pane.active_item;
+             let pinned_count = serialized_pane.pinned_count;
++            let extra_env = panel.read_with(cx, |panel, _| panel.terminal_control_env());
+             let new_items = deserialize_terminal_views(
+                 workspace_id,
+                 project.clone(),
+                 workspace.clone(),
+                 serialized_pane.children.as_slice(),
++                extra_env,
+                 cx,
+             );
+             cx.spawn({
+                 let pane = pane.downgrade();
++                let panel = panel.clone();
+                 async move |cx| {
+                     let new_items = new_items.await;
+ 
+@@ -244,9 +249,10 @@ async fn deserialize_pane_group(
+                             .update(cx, |workspace, cx| default_working_directory(workspace, cx))
+                             .ok()
+                             .flatten();
++                        let extra_env = panel.update(cx, |panel, _| panel.terminal_control_env());
+                         let terminal = project
+                             .update(cx, |project, cx| {
+-                                project.create_terminal_shell(working_directory, cx)
++                                project.create_terminal_shell(working_directory, extra_env, cx)
+                             })
+                             .await
+                             .log_err();
+@@ -281,15 +287,18 @@ fn deserialize_terminal_views(
+     project: Entity<Project>,
+     workspace: WeakEntity<Workspace>,
+     item_ids: &[u64],
++    extra_env: HashMap<String, String>,
+     cx: &mut AsyncWindowContext,
+ ) -> impl Future<Output = Vec<Entity<TerminalView>>> + use<> {
+     let deserialized_items = join_all(item_ids.iter().filter_map(|item_id| {
++        let extra_env = extra_env.clone();
+         cx.update(|window, cx| {
+-            TerminalView::deserialize(
++            TerminalView::deserialize_with_env(
+                 project.clone(),
+                 workspace.clone(),
+                 workspace_id,
+                 *item_id,
++                extra_env,
+                 window,
+                 cx,
+             )
+diff --git a/crates/terminal_view/src/terminal_launcher.rs b/crates/terminal_view/src/terminal_launcher.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8d9d133f500f9eeea7ce292c0bb4facf07159cc
+--- /dev/null
++++ b/crates/terminal_view/src/terminal_launcher.rs
+@@ -0,0 +1,1325 @@
++use std::{
++    cell::RefCell,
++    io,
++    path::{Path, PathBuf},
++    rc::Rc,
++};
++
++use anyhow::{Context as _, Result, anyhow, bail};
++use collections::HashMap;
++use futures::{
++    AsyncBufReadExt, AsyncReadExt, AsyncWriteExt,
++    io::{AsyncBufRead, BufReader},
++};
++use gpui::{AnyWindowHandle, App, AppContext as _, AsyncApp, Entity, Global, Task, WeakEntity};
++use net::async_net::{UnixListener, UnixStream};
++use serde::{Deserialize, Serialize};
++use task::{HideStrategy, RevealStrategy, SpawnInTerminal, TaskId};
++use tempfile::TempDir;
++use uuid::Uuid;
++use zed_actions::RevealTarget;
++
++use crate::terminal_panel::TerminalPanel;
++
++pub const TERMINAL_CONTROL_SOCKET_ENV: &str = "ZED_TERMINAL_CONTROL_SOCKET";
++pub const TERMINAL_CONTROL_WORKSPACE_ENV: &str = "ZED_TERMINAL_CONTROL_WORKSPACE";
++const MAX_REQUEST_BYTES: usize = 64 * 1024;
++const MAX_ERROR_BYTES: usize = 4 * 1024;
++
++pub fn init(cx: &mut App) {
++    TerminalLauncher::init_global(cx);
++}
++
++pub fn global(cx: &App) -> Option<Entity<TerminalLauncher>> {
++    TerminalLauncher::global(cx)
++}
++
++pub fn new_workspace_token() -> String {
++    Uuid::new_v4().to_string()
++}
++
++pub fn control_context(token: String, cx: &App) -> Option<TerminalControlContext> {
++    let launcher = global(cx)?;
++    let socket_path = launcher.read(cx).socket_path().to_path_buf();
++    Some(TerminalControlContext {
++        socket_path,
++        workspace_token: token,
++    })
++}
++
++pub fn register_workspace(
++    token: String,
++    window: AnyWindowHandle,
++    terminal_panel: Entity<TerminalPanel>,
++    cx: &mut App,
++) {
++    if let Some(launcher) = global(cx) {
++        launcher.update(cx, |launcher, _| {
++            launcher.register_workspace(token, window, terminal_panel)
++        });
++    }
++}
++
++pub fn unregister_workspace(token: &str, cx: &mut App) {
++    if let Some(launcher) = global(cx) {
++        launcher.update(cx, |launcher, _| launcher.unregister_workspace(token));
++    }
++}
++
++pub struct TerminalLauncher {
++    socket_path: PathBuf,
++    registry: Rc<RefCell<TerminalLauncherRegistry>>,
++    _socket_dir: TempDir,
++    _server_task: Task<()>,
++}
++
++struct GlobalTerminalLauncher(Entity<TerminalLauncher>);
++
++impl Global for GlobalTerminalLauncher {}
++
++impl TerminalLauncher {
++    fn init_global(cx: &mut App) {
++        if cx.try_global::<GlobalTerminalLauncher>().is_some() {
++            return;
++        }
++
++        match Self::bind(TerminalLauncherRegistry::default(), cx) {
++            Ok(launcher) => {
++                let launcher = cx.new(|_| launcher);
++                cx.set_global(GlobalTerminalLauncher(launcher));
++            }
++            Err(error) => {
++                log::debug!("failed to bind terminal launcher socket: {error}");
++            }
++        }
++    }
++
++    pub fn global(cx: &App) -> Option<Entity<Self>> {
++        cx.try_global::<GlobalTerminalLauncher>()
++            .map(|global| global.0.clone())
++    }
++
++    pub fn bind(registry: TerminalLauncherRegistry, cx: &mut App) -> Result<Self> {
++        let socket_dir = tempfile::Builder::new()
++            .prefix("zed-terminal-launcher")
++            .tempdir()?;
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt as _;
++            std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))?;
++        }
++        let socket_path = socket_dir.path().join("terminal.sock");
++        let listener = UnixListener::bind(&socket_path)?;
++        let registry = Rc::new(RefCell::new(registry));
++        let server_task = cx.spawn({
++            let registry = registry.clone();
++            async move |cx| {
++                loop {
++                    match listener.accept().await {
++                        Ok((stream, _)) => {
++                            Self::serve_connection(stream, registry.clone(), cx);
++                        }
++                        Err(error) => {
++                            log::error!("terminal launcher accept loop failed: {error}");
++                            break;
++                        }
++                    }
++                }
++            }
++        });
++
++        Ok(Self {
++            socket_path,
++            registry,
++            _socket_dir: socket_dir,
++            _server_task: server_task,
++        })
++    }
++
++    pub fn register_workspace(
++        &mut self,
++        token: String,
++        window: AnyWindowHandle,
++        terminal_panel: Entity<TerminalPanel>,
++    ) {
++        self.registry
++            .borrow_mut()
++            .register_workspace(token, window, terminal_panel);
++    }
++
++    pub fn unregister_workspace(&mut self, token: &str) {
++        self.registry.borrow_mut().unregister_workspace(token);
++    }
++
++    pub fn socket_path(&self) -> &Path {
++        &self.socket_path
++    }
++
++    fn serve_connection(
++        stream: UnixStream,
++        registry: Rc<RefCell<TerminalLauncherRegistry>>,
++        cx: &mut AsyncApp,
++    ) {
++        let (read, mut write) = stream.split();
++        cx.spawn(async move |cx| {
++            let mut reader = BufReader::new(read);
++            loop {
++                let line = match read_bounded_line(&mut reader).await {
++                    Ok(Some(line)) => line,
++                    Ok(None) => break,
++                    Err(error) => {
++                        log::debug!("failed to read terminal launcher request: {error}");
++                        let response = error_response_line(&error.to_string());
++                        if let Err(write_error) = write.write_all(response.as_bytes()).await {
++                            log::debug!(
++                                "failed to write terminal launcher error response: {write_error}"
++                            );
++                        }
++                        break;
++                    }
++                };
++
++                let response = cx.update(|cx| registry.borrow().handle_json_line(&line, cx));
++                let response = match response.await {
++                    Ok(response) => response,
++                    Err(error) => error_response_line(&error.to_string()),
++                };
++                if let Err(error) = write.write_all(response.as_bytes()).await {
++                    log::debug!("failed to write terminal launcher response: {error}");
++                    break;
++                }
++            }
++        })
++        .detach();
++    }
++
++    #[cfg(test)]
++    pub(crate) fn contains_workspace(&self, token: &str) -> bool {
++        self.registry.borrow().contains(token)
++    }
++}
++
++async fn read_bounded_line<R>(reader: &mut R) -> io::Result<Option<String>>
++where
++    R: AsyncBufRead + Unpin,
++{
++    let mut line = Vec::new();
++    loop {
++        let available = reader.fill_buf().await?;
++        if available.is_empty() {
++            if line.is_empty() {
++                return Ok(None);
++            }
++            break;
++        }
++
++        let take_len = available
++            .iter()
++            .position(|byte| *byte == b'\n')
++            .map_or(available.len(), |position| position + 1);
++        if line.len().saturating_add(take_len) > MAX_REQUEST_BYTES {
++            return Err(io::Error::new(
++                io::ErrorKind::InvalidData,
++                "terminal launcher request exceeds maximum size",
++            ));
++        }
++        line.extend_from_slice(&available[..take_len]);
++        reader.consume_unpin(take_len);
++        if line.ends_with(b"\n") {
++            break;
++        }
++    }
++
++    String::from_utf8(line).map(Some).map_err(|error| {
++        io::Error::new(
++            io::ErrorKind::InvalidData,
++            format!("terminal launcher request was not valid UTF-8: {error}"),
++        )
++    })
++}
++
++#[derive(Default)]
++pub struct TerminalLauncherRegistry {
++    workspaces: HashMap<String, (AnyWindowHandle, WeakEntity<TerminalPanel>)>,
++}
++
++impl TerminalLauncherRegistry {
++    pub fn register_workspace(
++        &mut self,
++        token: String,
++        window: AnyWindowHandle,
++        terminal_panel: Entity<TerminalPanel>,
++    ) {
++        self.workspaces
++            .insert(token, (window, terminal_panel.downgrade()));
++    }
++
++    pub fn unregister_workspace(&mut self, token: &str) {
++        self.workspaces.remove(token);
++    }
++
++    #[cfg(test)]
++    pub fn contains(&self, token: &str) -> bool {
++        self.workspaces.contains_key(token)
++    }
++
++    pub fn handle_json_line(&self, line: &str, cx: &mut App) -> Task<Result<String>> {
++        let request = match parse_request(line) {
++            Ok(request) => request,
++            Err(error) => return Task::ready(Err(error)),
++        };
++        let request_id = request.id;
++        let response = self.handle_request(request, cx);
++        cx.spawn(async move |_| {
++            let response = response.await?;
++            let mut line = serde_json::to_string(&success_response(request_id, response))?;
++            line.push('\n');
++            Ok(line)
++        })
++    }
++
++    pub fn handle_request(
++        &self,
++        request: TerminalLaunchRequest,
++        cx: &mut App,
++    ) -> Task<Result<TerminalLauncherResponse>> {
++        let Some((window_handle, terminal_panel)) =
++            self.workspaces.get(&request.workspace_token).cloned()
++        else {
++            return Task::ready(Err(anyhow!("unknown terminal launcher workspace")));
++        };
++
++        match request.method {
++            TerminalLaunchMethod::Ensure(_) => {
++                let task = cx.update_window(window_handle, |_, window, cx| {
++                    terminal_panel.update(cx, |terminal_panel, cx| {
++                        terminal_panel.ensure_terminal_launch_request(request, window, cx)
++                    })
++                });
++
++                match task {
++                    Ok(Ok(task)) => cx.spawn(async move |_| {
++                        let (terminal, created) = task.await?;
++                        Ok(TerminalLauncherResponse::Ensured {
++                            terminal_id: terminal.entity_id().as_u64(),
++                            created,
++                        })
++                    }),
++                    Ok(Err(error)) | Err(error) => Task::ready(Err(error)),
++                }
++            }
++            TerminalLaunchMethod::Close(_) => {
++                let closed = cx.update_window(window_handle, |_, window, cx| {
++                    terminal_panel.update(cx, |terminal_panel, cx| {
++                        terminal_panel.close_terminal_launch_request(request, window, cx)
++                    })
++                });
++
++                match closed {
++                    Ok(Ok(closed)) => Task::ready(Ok(TerminalLauncherResponse::Closed { closed })),
++                    Ok(Err(error)) | Err(error) => Task::ready(Err(error)),
++                }
++            }
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct TerminalControlContext {
++    pub(crate) socket_path: PathBuf,
++    pub(crate) workspace_token: String,
++}
++
++impl TerminalControlContext {
++    pub fn env(&self) -> HashMap<String, String> {
++        HashMap::from_iter([
++            (
++                TERMINAL_CONTROL_SOCKET_ENV.to_string(),
++                self.socket_path.to_string_lossy().into_owned(),
++            ),
++            (
++                TERMINAL_CONTROL_WORKSPACE_ENV.to_string(),
++                self.workspace_token.clone(),
++            ),
++        ])
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct TerminalLaunchRequest {
++    pub id: u64,
++    pub workspace_token: String,
++    pub method: TerminalLaunchMethod,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum TerminalLaunchMethod {
++    Ensure(TerminalEnsureParams),
++    Close(TerminalCloseParams),
++}
++
++#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct TerminalEnsureParams {
++    pub session_key: String,
++    pub command: String,
++    #[serde(default)]
++    pub args: Vec<String>,
++    #[serde(default)]
++    pub cwd: Option<PathBuf>,
++    #[serde(default)]
++    pub env: HashMap<String, String>,
++    #[serde(default)]
++    pub label: Option<String>,
++    #[serde(default)]
++    pub close_on_exit: bool,
++    #[serde(default)]
++    pub focus: bool,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct TerminalCloseParams {
++    pub session_key: String,
++}
++
++#[derive(Debug, Deserialize)]
++struct RawLaunchRequest {
++    id: u64,
++    workspace: String,
++    method: String,
++    #[serde(default)]
++    params: serde_json::Value,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum TerminalLauncherResponse {
++    Ensured { terminal_id: u64, created: bool },
++    Closed { closed: bool },
++}
++
++#[derive(Clone, Debug, Serialize)]
++pub struct TerminalLauncherSuccess {
++    pub id: u64,
++    pub result: serde_json::Value,
++}
++
++pub fn parse_request(raw: &str) -> Result<TerminalLaunchRequest> {
++    if raw.len() > MAX_REQUEST_BYTES {
++        bail!("invalid terminal launcher request: exceeds size limit");
++    }
++
++    let raw: RawLaunchRequest =
++        serde_json::from_str(raw).context("invalid terminal launcher request")?;
++
++    let method = match raw.method.as_str() {
++        "terminal.ensure" => {
++            let params: TerminalEnsureParams =
++                serde_json::from_value(raw.params).context("invalid terminal launcher request")?;
++            if params.session_key.is_empty() {
++                bail!("invalid terminal launcher request: empty sessionKey");
++            }
++            TerminalLaunchMethod::Ensure(params)
++        }
++        "terminal.close" => {
++            let params: TerminalCloseParams =
++                serde_json::from_value(raw.params).context("invalid terminal launcher request")?;
++            if params.session_key.is_empty() {
++                bail!("invalid terminal launcher request: empty sessionKey");
++            }
++            TerminalLaunchMethod::Close(params)
++        }
++        _ => bail!("invalid terminal launcher request: unsupported method"),
++    };
++
++    Ok(TerminalLaunchRequest {
++        id: raw.id,
++        workspace_token: raw.workspace,
++        method,
++    })
++}
++
++pub(crate) fn launcher_task_id(session_key: &str) -> TaskId {
++    TaskId(format!("terminal-launcher:{session_key}"))
++}
++
++pub fn request_to_task(request: TerminalLaunchRequest) -> SpawnInTerminal {
++    let TerminalLaunchMethod::Ensure(ensure) = request.method else {
++        panic!("request_to_task only supports terminal.ensure");
++    };
++    let label = ensure
++        .label
++        .clone()
++        .filter(|label| !label.is_empty())
++        .unwrap_or_else(|| {
++            if ensure.args.is_empty() {
++                ensure.command.clone()
++            } else {
++                format!("{} {}", ensure.command, ensure.args.join(" "))
++            }
++        });
++    let command_label = if ensure.args.is_empty() {
++        ensure.command.clone()
++    } else {
++        format!("{} {}", ensure.command, ensure.args.join(" "))
++    };
++
++    SpawnInTerminal {
++        id: launcher_task_id(&ensure.session_key),
++        full_label: label.clone(),
++        label,
++        command: Some(ensure.command),
++        args: ensure.args,
++        command_label,
++        cwd: ensure.cwd,
++        env: ensure.env,
++        use_new_terminal: true,
++        allow_concurrent_runs: true,
++        reveal: if ensure.focus {
++            RevealStrategy::Always
++        } else {
++            RevealStrategy::NoFocus
++        },
++        reveal_target: RevealTarget::Dock,
++        hide: if ensure.close_on_exit {
++            HideStrategy::Always
++        } else {
++            HideStrategy::Never
++        },
++        ..Default::default()
++    }
++}
++
++pub fn success_response(id: u64, response: TerminalLauncherResponse) -> TerminalLauncherSuccess {
++    let result = match response {
++        TerminalLauncherResponse::Ensured {
++            terminal_id,
++            created,
++        } => {
++            serde_json::json!({ "terminalId": terminal_id, "created": created })
++        }
++        TerminalLauncherResponse::Closed { closed } => {
++            serde_json::json!({ "closed": closed })
++        }
++    };
++    TerminalLauncherSuccess { id, result }
++}
++
++fn error_response_line(message: &str) -> String {
++    let mut message = message.to_string();
++    if message.len() > MAX_ERROR_BYTES {
++        message.truncate(MAX_ERROR_BYTES);
++    }
++    format!("{}\n", serde_json::json!({ "error": message }))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use gpui::TestAppContext;
++    use pretty_assertions::assert_eq;
++    use project::FakeFs;
++    use workspace::MultiWorkspace;
++
++    use crate::terminal_panel::TerminalPanel;
++
++    #[test]
++    fn control_context_advertises_socket_and_workspace() {
++        let context = TerminalControlContext {
++            socket_path: PathBuf::from("/tmp/zed-terminal.sock"),
++            workspace_token: "workspace-a".into(),
++        };
++        let env = context.env();
++        assert_eq!(
++            env.get(TERMINAL_CONTROL_SOCKET_ENV),
++            Some(&"/tmp/zed-terminal.sock".into())
++        );
++        assert_eq!(
++            env.get(TERMINAL_CONTROL_WORKSPACE_ENV),
++            Some(&"workspace-a".into())
++        );
++    }
++
++    #[test]
++    fn parses_terminal_ensure_request() {
++        let request = parse_request(
++            r#"{"id":7,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-a","command":"tmux","args":["attach-session","-t","pi-live-a"],"label":"Pi live","closeOnExit":true,"focus":false}}"#,
++        )
++        .unwrap();
++        assert_eq!(request.id, 7);
++        assert_eq!(request.workspace_token, "workspace-a");
++        let TerminalLaunchMethod::Ensure(ensure) = request.method else {
++            panic!("expected terminal.ensure");
++        };
++        assert_eq!(ensure.session_key, "pi-live-a");
++        assert_eq!(ensure.command, "tmux");
++        assert_eq!(ensure.args, vec!["attach-session", "-t", "pi-live-a"]);
++        assert_eq!(ensure.label.as_deref(), Some("Pi live"));
++        assert!(ensure.close_on_exit);
++        assert!(!ensure.focus);
++    }
++
++    #[test]
++    fn parses_terminal_close_request() {
++        let request = parse_request(
++            r#"{"id":8,"workspace":"workspace-a","method":"terminal.close","params":{"sessionKey":"pi-live-a"}}"#,
++        )
++        .unwrap();
++        assert_eq!(request.id, 8);
++        assert_eq!(request.workspace_token, "workspace-a");
++        let TerminalLaunchMethod::Close(close) = request.method else {
++            panic!("expected terminal.close");
++        };
++        assert_eq!(close.session_key, "pi-live-a");
++    }
++
++    #[test]
++    fn rejects_empty_session_key() {
++        let error = parse_request(
++            r#"{"id":7,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"","command":"tmux"}}"#,
++        )
++        .unwrap_err();
++        assert!(
++            error
++                .to_string()
++                .contains("invalid terminal launcher request")
++        );
++
++        let error = parse_request(
++            r#"{"id":8,"workspace":"workspace-a","method":"terminal.close","params":{"sessionKey":""}}"#,
++        )
++        .unwrap_err();
++        assert!(
++            error
++                .to_string()
++                .contains("invalid terminal launcher request")
++        );
++    }
++
++    #[test]
++    fn rejects_invalid_request() {
++        let error = parse_request(r#"{"method":"terminal.ensure"}"#).unwrap_err();
++        assert!(
++            error
++                .to_string()
++                .contains("invalid terminal launcher request")
++        );
++    }
++
++    #[test]
++    fn serializes_ensured_and_closed_responses() {
++        let response = success_response(
++            7,
++            TerminalLauncherResponse::Ensured {
++                terminal_id: 42,
++                created: false,
++            },
++        );
++        assert_eq!(
++            serde_json::to_value(response).unwrap(),
++            serde_json::json!({
++                "id": 7,
++                "result": { "terminalId": 42, "created": false }
++            })
++        );
++
++        let response = success_response(8, TerminalLauncherResponse::Closed { closed: true });
++        assert_eq!(
++            serde_json::to_value(response).unwrap(),
++            serde_json::json!({
++                "id": 8,
++                "result": { "closed": true }
++            })
++        );
++    }
++
++    #[gpui::test]
++    async fn bounded_line_reader_rejects_oversized_requests(_cx: &mut TestAppContext) {
++        let payload = vec![b'a'; MAX_REQUEST_BYTES + 1];
++        let mut reader = BufReader::new(futures::io::Cursor::new(payload));
++
++        let error = read_bounded_line(&mut reader)
++            .await
++            .expect_err("oversized requests should be rejected");
++
++        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    }
++
++    fn init_test(cx: &mut TestAppContext) {
++        cx.update(|cx| {
++            let store = settings::SettingsStore::test(cx);
++            cx.set_global(store);
++            theme_settings::init(theme::LoadThemes::JustBase, cx);
++            editor::init(cx);
++            crate::init(cx);
++        });
++    }
++
++    async fn init_workspace_with_panel(
++        cx: &mut TestAppContext,
++    ) -> (gpui::WindowHandle<MultiWorkspace>, Entity<TerminalPanel>) {
++        let fs = FakeFs::new(cx.executor());
++        let project = project::Project::test(fs, [], cx).await;
++        let window_handle =
++            cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++
++        let terminal_panel = window_handle
++            .update(cx, |multi_workspace, window, cx| {
++                multi_workspace.workspace().update(cx, |workspace, cx| {
++                    let panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
++                    workspace.add_panel(panel.clone(), window, cx);
++                    panel
++                })
++            })
++            .expect("Failed to initialize workspace with terminal panel");
++
++        (window_handle, terminal_panel)
++    }
++
++    #[gpui::test]
++    async fn terminal_panels_own_distinct_launcher_tokens(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_a, panel_a) = init_workspace_with_panel(cx).await;
++        let (window_b, panel_b) = init_workspace_with_panel(cx).await;
++
++        let (token_a, env_a) = panel_a.read_with(cx, |panel, _| {
++            (
++                panel.terminal_control_workspace_token.clone(),
++                panel.terminal_control_env(),
++            )
++        });
++        let (token_b, env_b) = panel_b.read_with(cx, |panel, _| {
++            (
++                panel.terminal_control_workspace_token.clone(),
++                panel.terminal_control_env(),
++            )
++        });
++
++        assert_ne!(token_a, token_b);
++        assert_eq!(env_a.get(TERMINAL_CONTROL_WORKSPACE_ENV), Some(&token_a));
++        assert_eq!(env_b.get(TERMINAL_CONTROL_WORKSPACE_ENV), Some(&token_b));
++        assert_eq!(
++            env_a.get(TERMINAL_CONTROL_SOCKET_ENV),
++            env_b.get(TERMINAL_CONTROL_SOCKET_ENV)
++        );
++        assert!(env_a.contains_key(TERMINAL_CONTROL_SOCKET_ENV));
++
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(token_a.clone(), window_a.into(), panel_a);
++        registry.register_workspace(token_b.clone(), window_b.into(), panel_b);
++        registry.unregister_workspace(&token_a);
++        assert!(!registry.contains(&token_a));
++        assert!(registry.contains(&token_b));
++    }
++
++    #[gpui::test]
++    async fn registry_unregisters_workspace_token(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel,
++        );
++        registry.unregister_workspace("workspace-a");
++
++        let request = parse_request(
++            r#"{"id":7,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-a","command":"echo"}}"#,
++        )
++        .expect("terminal.ensure request should parse");
++        let error = cx
++            .update(|cx| registry.handle_request(request, cx))
++            .await
++            .expect_err("unregistered workspaces should be rejected");
++
++        assert!(
++            error
++                .to_string()
++                .contains("unknown terminal launcher workspace"),
++            "unexpected error: {error}"
++        );
++    }
++
++    #[gpui::test]
++    async fn registry_routes_create_by_workspace_token(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let panel_items_before =
++            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len());
++        let request = parse_request(
++            r#"{"id":7,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-a","command":"echo","args":["hello"],"label":"Pi live terminal"}}"#,
++        )
++        .expect("terminal.ensure request should parse");
++
++        let response = cx
++            .update(|cx| registry.handle_request(request, cx))
++            .await
++            .expect("terminal launcher request should be routed");
++        cx.run_until_parked();
++
++        assert!(
++            matches!(
++                response,
++                TerminalLauncherResponse::Ensured { created: true, .. }
++            ),
++            "unexpected response: {response:?}"
++        );
++        let panel_items_after =
++            terminal_panel.read_with(cx, |panel, cx| panel.active_pane.read(cx).items_len());
++        assert_eq!(panel_items_after, panel_items_before + 1);
++
++        // Close the created launcher tab so the panel does not leak test items.
++        let close = parse_request(
++            r#"{"id":8,"workspace":"workspace-a","method":"terminal.close","params":{"sessionKey":"pi-live-a"}}"#,
++        )
++        .expect("terminal.close request should parse");
++        let closed = cx
++            .update(|cx| registry.handle_request(close, cx))
++            .await
++            .expect("close should route");
++        assert_eq!(closed, TerminalLauncherResponse::Closed { closed: true });
++    }
++
++    fn ensure_request(id: u64, workspace: &str, session_key: &str) -> TerminalLaunchRequest {
++        parse_request(&format!(
++            r#"{{"id":{id},"workspace":"{workspace}","method":"terminal.ensure","params":{{"sessionKey":"{session_key}","command":"cat","closeOnExit":false}}}}"#
++        ))
++        .expect("ensure request should parse")
++    }
++
++    fn close_request(id: u64, workspace: &str, session_key: &str) -> TerminalLaunchRequest {
++        parse_request(&format!(
++            r#"{{"id":{id},"workspace":"{workspace}","method":"terminal.close","params":{{"sessionKey":"{session_key}"}}}}"#
++        ))
++        .expect("close request should parse")
++    }
++
++    fn panel_item_count(panel: &Entity<TerminalPanel>, cx: &TestAppContext) -> usize {
++        panel.read_with(cx, |panel, cx| {
++            panel
++                .center
++                .panes()
++                .iter()
++                .map(|pane| pane.read(cx).items_len())
++                .sum()
++        })
++    }
++
++    async fn handle(
++        registry: &TerminalLauncherRegistry,
++        request: TerminalLaunchRequest,
++        cx: &mut TestAppContext,
++    ) -> TerminalLauncherResponse {
++        let response = cx
++            .update(|cx| registry.handle_request(request, cx))
++            .await
++            .expect("launcher request should succeed");
++        cx.run_until_parked();
++        response
++    }
++
++    #[gpui::test]
++    async fn ensure_reuses_existing_launcher_tab(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let first = handle(&registry, ensure_request(1, "workspace-a", "A"), cx).await;
++        let second = handle(&registry, ensure_request(2, "workspace-a", "A"), cx).await;
++
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: first_id,
++            created: first_created,
++        } = first
++        else {
++            panic!("expected ensured response, got {first:?}");
++        };
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: second_id,
++            created: second_created,
++        } = second
++        else {
++            panic!("expected ensured response, got {second:?}");
++        };
++
++        assert!(first_created);
++        assert!(!second_created);
++        assert_eq!(first_id, second_id);
++        assert_eq!(panel_item_count(&terminal_panel, cx), 1);
++
++        let _ = handle(&registry, close_request(3, "workspace-a", "A"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn concurrent_ensures_coalesce_to_one_tab(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let first_task =
++            cx.update(|cx| registry.handle_request(ensure_request(1, "workspace-a", "A"), cx));
++        let second_task =
++            cx.update(|cx| registry.handle_request(ensure_request(2, "workspace-a", "A"), cx));
++
++        let (first, second) = futures::join!(first_task, second_task);
++        let first = first.expect("first concurrent ensure should succeed");
++        let second = second.expect("second concurrent ensure should succeed");
++        cx.run_until_parked();
++
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: first_id,
++            created: first_created,
++        } = first
++        else {
++            panic!("expected ensured response, got {first:?}");
++        };
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: second_id,
++            created: second_created,
++        } = second
++        else {
++            panic!("expected ensured response, got {second:?}");
++        };
++
++        assert_eq!(first_id, second_id);
++        assert_eq!(first_created ^ second_created, true);
++        assert_eq!(panel_item_count(&terminal_panel, cx), 1);
++
++        let _ = handle(&registry, close_request(3, "workspace-a", "A"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn ensure_distinct_keys_create_independent_tabs(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let a = handle(&registry, ensure_request(1, "workspace-a", "A"), cx).await;
++        let b = handle(&registry, ensure_request(2, "workspace-a", "B"), cx).await;
++
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: a_id,
++            created: a_created,
++        } = a
++        else {
++            panic!("expected ensured response, got {a:?}");
++        };
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: b_id,
++            created: b_created,
++        } = b
++        else {
++            panic!("expected ensured response, got {b:?}");
++        };
++
++        assert!(a_created && b_created);
++        assert_ne!(a_id, b_id);
++        assert_eq!(panel_item_count(&terminal_panel, cx), 2);
++
++        let _ = handle(&registry, close_request(3, "workspace-a", "A"), cx).await;
++        let _ = handle(&registry, close_request(4, "workspace-a", "B"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn close_removes_only_matching_key(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let a = handle(&registry, ensure_request(1, "workspace-a", "A"), cx).await;
++        let b = handle(&registry, ensure_request(2, "workspace-a", "B"), cx).await;
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: b_id, ..
++        } = b
++        else {
++            panic!("expected ensured response, got {b:?}");
++        };
++        let _ = a;
++
++        let closed = handle(&registry, close_request(3, "workspace-a", "A"), cx).await;
++        assert_eq!(closed, TerminalLauncherResponse::Closed { closed: true });
++        assert_eq!(panel_item_count(&terminal_panel, cx), 1);
++
++        let again = handle(&registry, ensure_request(4, "workspace-a", "B"), cx).await;
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: again_id,
++            created: again_created,
++        } = again
++        else {
++            panic!("expected ensured response, got {again:?}");
++        };
++        assert!(!again_created);
++        assert_eq!(again_id, b_id);
++
++        let missing = handle(&registry, close_request(5, "workspace-a", "A"), cx).await;
++        assert_eq!(missing, TerminalLauncherResponse::Closed { closed: false });
++
++        let _ = handle(&registry, close_request(6, "workspace-a", "B"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn ensure_after_close_creates_replacement(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel.clone(),
++        );
++
++        let first = handle(&registry, ensure_request(1, "workspace-a", "A"), cx).await;
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: first_id,
++            ..
++        } = first
++        else {
++            panic!("expected ensured response, got {first:?}");
++        };
++
++        let closed = handle(&registry, close_request(2, "workspace-a", "A"), cx).await;
++        assert_eq!(closed, TerminalLauncherResponse::Closed { closed: true });
++        assert_eq!(panel_item_count(&terminal_panel, cx), 0);
++
++        let second = handle(&registry, ensure_request(3, "workspace-a", "A"), cx).await;
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: second_id,
++            created: second_created,
++        } = second
++        else {
++            panic!("expected ensured response, got {second:?}");
++        };
++
++        assert!(second_created);
++        assert_ne!(first_id, second_id);
++        assert_eq!(panel_item_count(&terminal_panel, cx), 1);
++
++        let _ = handle(&registry, close_request(4, "workspace-a", "A"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn same_key_is_isolated_across_workspace_panels(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_a, panel_a) = init_workspace_with_panel(cx).await;
++        let (window_b, panel_b) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace("workspace-a".to_string(), window_a.into(), panel_a.clone());
++        registry.register_workspace("workspace-b".to_string(), window_b.into(), panel_b.clone());
++
++        let a = handle(&registry, ensure_request(1, "workspace-a", "shared"), cx).await;
++        let b = handle(&registry, ensure_request(2, "workspace-b", "shared"), cx).await;
++
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: a_id,
++            created: a_created,
++        } = a
++        else {
++            panic!("expected ensured response, got {a:?}");
++        };
++        let TerminalLauncherResponse::Ensured {
++            terminal_id: b_id,
++            created: b_created,
++        } = b
++        else {
++            panic!("expected ensured response, got {b:?}");
++        };
++
++        assert!(a_created && b_created);
++        assert_ne!(a_id, b_id);
++        assert_eq!(panel_item_count(&panel_a, cx), 1);
++        assert_eq!(panel_item_count(&panel_b, cx), 1);
++
++        let _ = handle(&registry, close_request(3, "workspace-a", "shared"), cx).await;
++        let _ = handle(&registry, close_request(4, "workspace-b", "shared"), cx).await;
++    }
++
++    #[gpui::test]
++    async fn socket_handles_create_line(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let mut registry = TerminalLauncherRegistry::default();
++        registry.register_workspace(
++            "workspace-a".to_string(),
++            window_handle.into(),
++            terminal_panel,
++        );
++        let server = cx
++            .update(|cx| TerminalLauncher::bind(registry, cx))
++            .expect("terminal launcher socket should bind");
++        let socket_path = server.socket_path().to_path_buf();
++
++        let response = cx
++            .update(|cx| {
++                cx.spawn(async move |_| {
++                    let mut stream = UnixStream::connect(socket_path).await?;
++                    stream
++                        .write_all(
++                            br#"{"id":7,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-a","command":"echo","args":["hello"],"label":"Pi live terminal"}}
++"#,
++                        )
++                        .await?;
++                    let mut response = String::new();
++                    BufReader::new(stream).read_line(&mut response).await?;
++                    anyhow::Ok(response)
++                })
++            })
++            .await
++            .expect("socket should return a response line");
++
++        let response: serde_json::Value =
++            serde_json::from_str(response.trim_end()).expect("response should be valid JSON");
++        assert_eq!(response["id"], 7);
++        assert!(response["result"]["terminalId"].as_u64().is_some());
++        assert_eq!(response["result"]["created"], true);
++    }
++
++    #[gpui::test]
++    async fn init_starts_global_socket_server(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let socket_path = cx.update(|cx| {
++            TerminalLauncher::global(cx)
++                .expect("terminal launcher should be global")
++                .read(cx)
++                .socket_path()
++                .to_path_buf()
++        });
++
++        assert!(socket_path.exists());
++        let socket_dir = socket_path.parent().expect("socket should have parent dir");
++        assert!(
++            socket_dir
++                .file_name()
++                .and_then(|name| name.to_str())
++                .is_some_and(|name| name.starts_with("zed-terminal-launcher")),
++            "socket directory should use the terminal launcher tempfile prefix: {socket_dir:?}"
++        );
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt as _;
++            assert_eq!(
++                std::fs::metadata(socket_dir)
++                    .expect("socket directory should exist")
++                    .permissions()
++                    .mode()
++                    & 0o777,
++                0o700,
++            );
++        }
++    }
++
++    #[test]
++    fn request_to_task_maps_ensure_params() {
++        let request = parse_request(
++            r#"{"id":9,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-a","command":"tmux","args":["attach","-t","pi"],"cwd":"/tmp/work","env":{"FOO":"bar"},"label":"Pi live","closeOnExit":true,"focus":false}}"#,
++        )
++        .unwrap();
++        let task = request_to_task(request);
++        assert_eq!(task.id, launcher_task_id("pi-live-a"));
++        assert_eq!(task.command.as_deref(), Some("tmux"));
++        assert_eq!(task.args, vec!["attach", "-t", "pi"]);
++        assert_eq!(task.cwd.as_deref(), Some(Path::new("/tmp/work")));
++        assert_eq!(task.env.get("FOO"), Some(&"bar".into()));
++        assert_eq!(task.label, "Pi live");
++        assert_eq!(task.full_label, "Pi live");
++        assert!(task.use_new_terminal);
++        assert!(task.allow_concurrent_runs);
++        assert_eq!(task.reveal, RevealStrategy::NoFocus);
++        assert_eq!(task.reveal_target, RevealTarget::Dock);
++        assert_eq!(task.hide, HideStrategy::Always);
++
++        let focused_request = parse_request(
++            r#"{"id":10,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-b","command":"echo","args":["hi"],"focus":true}}"#,
++        )
++        .unwrap();
++        let focused_task = request_to_task(focused_request);
++        assert_eq!(focused_task.id, launcher_task_id("pi-live-b"));
++        assert_eq!(focused_task.reveal, RevealStrategy::Always);
++        assert_eq!(focused_task.label, "echo hi");
++        assert_eq!(focused_task.hide, HideStrategy::Never);
++
++        let request = parse_request(
++            r#"{"id":11,"workspace":"workspace-a","method":"terminal.ensure","params":{"sessionKey":"pi-live-c","command":"echo"}}"#,
++        )
++        .unwrap();
++        let task = request_to_task(request);
++        assert_eq!(task.id, launcher_task_id("pi-live-c"));
++        assert_eq!(task.label, "echo");
++        assert_eq!(task.command_label, "echo");
++        assert_eq!(task.reveal, RevealStrategy::NoFocus);
++    }
++
++    #[test]
++    fn error_response_line_is_bounded_json() {
++        let response = error_response_line("boom");
++        assert!(response.ends_with('\n'));
++        let value: serde_json::Value = serde_json::from_str(response.trim_end()).unwrap();
++        assert_eq!(value["error"], "boom");
++
++        let oversized = "x".repeat(MAX_ERROR_BYTES + 32);
++        let response = error_response_line(&oversized);
++        let value: serde_json::Value = serde_json::from_str(response.trim_end()).unwrap();
++        let error = value["error"].as_str().unwrap();
++        assert_eq!(error.len(), MAX_ERROR_BYTES);
++    }
++
++    #[gpui::test]
++    async fn socket_returns_json_error_for_oversized_request(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let server = cx
++            .update(|cx| TerminalLauncher::bind(TerminalLauncherRegistry::default(), cx))
++            .expect("terminal launcher socket should bind");
++        let socket_path = server.socket_path().to_path_buf();
++
++        let response = cx
++            .update(|cx| {
++                cx.spawn(async move |_| {
++                    let mut stream = UnixStream::connect(socket_path).await?;
++                    let mut payload = vec![b'a'; MAX_REQUEST_BYTES + 8];
++                    payload.push(b'\n');
++                    stream.write_all(&payload).await?;
++                    let mut response = String::new();
++                    BufReader::new(stream).read_line(&mut response).await?;
++                    anyhow::Ok(response)
++                })
++            })
++            .await
++            .expect("socket should return a protocol error line");
++
++        let response: serde_json::Value =
++            serde_json::from_str(response.trim_end()).expect("response should be valid JSON");
++        assert!(
++            response["error"]
++                .as_str()
++                .is_some_and(|error| error.contains("maximum size")),
++            "unexpected response: {response}"
++        );
++    }
++
++    #[gpui::test]
++    async fn socket_returns_json_error_for_invalid_utf8(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let server = cx
++            .update(|cx| TerminalLauncher::bind(TerminalLauncherRegistry::default(), cx))
++            .expect("terminal launcher socket should bind");
++        let socket_path = server.socket_path().to_path_buf();
++
++        let response = cx
++            .update(|cx| {
++                cx.spawn(async move |_| {
++                    let mut stream = UnixStream::connect(socket_path).await?;
++                    stream.write_all(b"\xff\n").await?;
++                    let mut response = String::new();
++                    BufReader::new(stream).read_line(&mut response).await?;
++                    anyhow::Ok(response)
++                })
++            })
++            .await
++            .expect("socket should return a protocol error line");
++
++        let response: serde_json::Value =
++            serde_json::from_str(response.trim_end()).expect("response should be valid JSON");
++        assert!(
++            response["error"]
++                .as_str()
++                .is_some_and(|error| error.contains("UTF-8")),
++            "unexpected response: {response}"
++        );
++    }
++
++    #[gpui::test]
++    async fn panel_release_unregisters_from_global_registry(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++
++        let (window_handle, terminal_panel) = init_workspace_with_panel(cx).await;
++        let token = terminal_panel.read_with(cx, |panel, _| {
++            panel.terminal_control_workspace_token.clone()
++        });
++
++        let registered = cx.update(|cx| {
++            TerminalLauncher::global(cx)
++                .expect("terminal launcher should be global")
++                .read(cx)
++                .contains_workspace(&token)
++        });
++        assert!(
++            registered,
++            "panel construction should register the workspace token"
++        );
++
++        window_handle
++            .update(cx, |multi_workspace, window, cx| {
++                multi_workspace.workspace().update(cx, |workspace, cx| {
++                    workspace.remove_panel(&terminal_panel, window, cx);
++                });
++            })
++            .expect("panel should be removable");
++        drop(terminal_panel);
++        cx.run_until_parked();
++
++        let still_registered = cx.update(|cx| {
++            TerminalLauncher::global(cx)
++                .expect("terminal launcher should be global")
++                .read(cx)
++                .contains_workspace(&token)
++        });
++        assert!(
++            !still_registered,
++            "panel release should unregister the workspace token from the global registry"
++        );
++    }
++}
+diff --git a/crates/terminal_view/src/terminal_panel.rs b/crates/terminal_view/src/terminal_panel.rs
+index 602667c725a524d8937a7171ed82f4f787990093..9d504a5e25cd6e5eab36672bb9069b3b443f0aef 100644
+--- a/crates/terminal_view/src/terminal_panel.rs
++++ b/crates/terminal_view/src/terminal_panel.rs
+@@ -5,6 +5,9 @@ use crate::{
+     persistence::{
+         SerializedItems, SerializedTerminalPanel, deserialize_terminal_panel, serialize_pane_group,
+     },
++    terminal_launcher::{
++        self, TerminalControlContext, TerminalLaunchMethod, TerminalLaunchRequest, launcher_task_id,
++    },
+ };
+ use breadcrumbs::Breadcrumbs;
+ use collections::HashMap;
+@@ -84,6 +87,13 @@ pub struct TerminalPanel {
+     deferred_tasks: HashMap<TaskId, Task<()>>,
+     assistant_enabled: bool,
+     active: bool,
++    /// Opaque launcher workspace token for this panel. Read by tests; production
++    /// paths use `terminal_control_context` / env helpers instead.
++    #[cfg_attr(not(test), allow(dead_code))]
++    pub(crate) terminal_control_workspace_token: String,
++    terminal_control_context: Option<TerminalControlContext>,
++    pending_launcher_ensures:
++        HashMap<String, Vec<oneshot::Sender<std::result::Result<WeakEntity<Terminal>, String>>>>,
+ }
+ 
+ impl TerminalPanel {
+@@ -91,6 +101,22 @@ impl TerminalPanel {
+         let project = workspace.project();
+         let pane = new_terminal_pane(workspace.weak_handle(), project.clone(), false, window, cx);
+         let center = PaneGroup::new(pane.clone());
++        let token = terminal_launcher::new_workspace_token();
++        let context = terminal_launcher::control_context(token.clone(), cx);
++        if context.is_some() {
++            terminal_launcher::register_workspace(
++                token.clone(),
++                window.window_handle(),
++                cx.entity(),
++                cx,
++            );
++        }
++        let release_token = token.clone();
++        cx.on_release(move |_, cx| {
++            terminal_launcher::unregister_workspace(&release_token, cx);
++        })
++        .detach();
++
+         let terminal_panel = Self {
+             center,
+             active_pane: pane,
+@@ -101,6 +127,9 @@ impl TerminalPanel {
+             deferred_tasks: HashMap::default(),
+             assistant_enabled: false,
+             active: false,
++            terminal_control_workspace_token: token,
++            terminal_control_context: context,
++            pending_launcher_ensures: HashMap::default(),
+         };
+         terminal_panel.apply_tab_bar_buttons(&terminal_panel.active_pane, cx);
+         terminal_panel
+@@ -468,6 +497,7 @@ impl TerminalPanel {
+         } else {
+             false
+         };
++        let extra_env = self.terminal_control_env();
+         cx.spawn_in(window, async move |panel, cx| {
+             let terminal = project
+                 .update(cx, |project, cx| match terminal_view {
+@@ -475,8 +505,9 @@ impl TerminalPanel {
+                         &view.read(cx).terminal.clone(),
+                         cx,
+                         working_directory,
++                        extra_env.clone(),
+                     ),
+-                    None => project.create_terminal_shell(working_directory, cx),
++                    None => project.create_terminal_shell(working_directory, extra_env, cx),
+                 })
+                 .await
+                 .log_err()?;
+@@ -531,6 +562,168 @@ impl TerminalPanel {
+             .detach_and_log_err(cx);
+     }
+ 
++    pub fn spawn_terminal_launch_request(
++        &mut self,
++        request: TerminalLaunchRequest,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<WeakEntity<Terminal>>> {
++        let task = terminal_launcher::request_to_task(request);
++        self.spawn_task(&task, window, cx)
++    }
++
++    pub fn ensure_terminal_launch_request(
++        &mut self,
++        request: TerminalLaunchRequest,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> Task<Result<(WeakEntity<Terminal>, bool)>> {
++        let TerminalLaunchMethod::Ensure(ensure) = request.method.clone() else {
++            return Task::ready(Err(anyhow!(
++                "ensure_terminal_launch_request only supports terminal.ensure"
++            )));
++        };
++
++        let session_key = ensure.session_key.clone();
++        let focus = ensure.focus;
++
++        if let Some((item_index, pane, terminal_view)) =
++            self.find_launcher_terminal_view(&session_key, cx)
++        {
++            if focus {
++                self.activate_terminal_view(&pane, item_index, true, window, cx);
++                let workspace = self.workspace.clone();
++                cx.spawn_in(window, async move |_, cx| {
++                    workspace
++                        .update_in(cx, |workspace, window, cx| {
++                            workspace.focus_panel::<Self>(window, cx);
++                        })
++                        .ok();
++                })
++                .detach();
++            }
++            return Task::ready(Ok((terminal_view.read(cx).terminal().downgrade(), false)));
++        }
++
++        if self.pending_launcher_ensures.contains_key(&session_key) {
++            let (tx, rx) = oneshot::channel();
++            self.pending_launcher_ensures
++                .entry(session_key.clone())
++                .or_default()
++                .push(tx);
++            let workspace = self.workspace.clone();
++            return cx.spawn_in(window, async move |this, cx| {
++                let terminal = rx
++                    .await
++                    .map_err(|_| anyhow!("launcher ensure waiter dropped"))?
++                    .map_err(|error| anyhow!(error))?;
++                if focus {
++                    this.update_in(cx, |this, window, cx| {
++                        if let Some((item_index, pane, _)) =
++                            this.find_launcher_terminal_view(&session_key, cx)
++                        {
++                            this.activate_terminal_view(&pane, item_index, true, window, cx);
++                        }
++                    })
++                    .ok();
++                    workspace
++                        .update_in(cx, |workspace, window, cx| {
++                            workspace.focus_panel::<Self>(window, cx);
++                        })
++                        .ok();
++                }
++                Ok((terminal, false))
++            });
++        }
++
++        self.pending_launcher_ensures
++            .insert(session_key.clone(), Vec::new());
++
++        let spawn = self.spawn_terminal_launch_request(request, window, cx);
++        cx.spawn(async move |this, cx| {
++            let result = spawn.await;
++            let notify = this.update(cx, |this, _| {
++                this.pending_launcher_ensures
++                    .remove(&session_key)
++                    .unwrap_or_default()
++            })?;
++
++            match &result {
++                Ok(terminal) => {
++                    for waiter in notify {
++                        waiter.send(Ok(terminal.clone())).ok();
++                    }
++                    Ok((terminal.clone(), true))
++                }
++                Err(error) => {
++                    let message = error.to_string();
++                    for waiter in notify {
++                        waiter.send(Err(message.clone())).ok();
++                    }
++                    Err(anyhow!(message))
++                }
++            }
++        })
++    }
++
++    pub fn close_terminal_launch_request(
++        &mut self,
++        request: TerminalLaunchRequest,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++    ) -> bool {
++        let TerminalLaunchMethod::Close(close) = &request.method else {
++            return false;
++        };
++
++        let Some((_, pane, terminal_view)) =
++            self.find_launcher_terminal_view(&close.session_key, cx)
++        else {
++            return false;
++        };
++
++        pane.update(cx, |pane, cx| {
++            pane.remove_item(terminal_view.entity_id(), false, false, window, cx);
++        });
++        true
++    }
++
++    fn find_launcher_terminal_view(
++        &self,
++        session_key: &str,
++        cx: &App,
++    ) -> Option<(usize, Entity<Pane>, Entity<TerminalView>)> {
++        let expected_id = launcher_task_id(session_key);
++        for pane in self.center.panes() {
++            for (index, item) in pane.read(cx).items().enumerate() {
++                let Some(terminal_view) = item.act_as::<TerminalView>(cx) else {
++                    continue;
++                };
++                let matches = terminal_view
++                    .read(cx)
++                    .terminal()
++                    .read(cx)
++                    .task()
++                    .is_some_and(|task| task.spawned_task.id == expected_id);
++                if matches {
++                    return Some((index, pane.clone(), terminal_view));
++                }
++            }
++        }
++        None
++    }
++
++    pub(crate) fn terminal_control_env(&self) -> HashMap<String, String> {
++        self.terminal_control_context
++            .as_ref()
++            .map(TerminalControlContext::env)
++            .unwrap_or_default()
++    }
++
++    pub(crate) fn apply_terminal_control(&self, env: &mut HashMap<String, String>) {
++        env.extend(self.terminal_control_env());
++    }
++
+     pub fn spawn_task(
+         &mut self,
+         task: &SpawnInTerminal,
+@@ -561,7 +754,8 @@ impl TerminalPanel {
+             task.shell.clone()
+         };
+ 
+-        let task = prepare_task_for_spawn(task, &shell, is_windows);
++        let mut task = prepare_task_for_spawn(task, &shell, is_windows);
++        self.apply_terminal_control(&mut task.env);
+ 
+         if task.allow_concurrent_runs && task.use_new_terminal {
+             return self.spawn_in_new_terminal(task, window, cx);
+@@ -651,11 +845,15 @@ impl TerminalPanel {
+         if center_pane_has_focus && active_center_item_is_terminal {
+             let working_directory = default_working_directory(workspace, cx);
+             let local = action.local;
++            let extra_env = workspace
++                .panel::<Self>(cx)
++                .map(|panel| panel.read(cx).terminal_control_env())
++                .unwrap_or_default();
+             Self::add_center_terminal(workspace, window, cx, move |project, cx| {
+                 if local {
+-                    project.create_local_terminal(cx)
++                    project.create_local_terminal(extra_env, cx)
+                 } else {
+-                    project.create_terminal_shell(working_directory, cx)
++                    project.create_terminal_shell(working_directory, extra_env, cx)
+                 }
+             })
+             .detach_and_log_err(cx);
+@@ -869,13 +1067,20 @@ impl TerminalPanel {
+                 terminal_panel.active_pane.clone()
+             })?;
+             let project = workspace.read_with(cx, |workspace, _| workspace.project().clone())?;
++            let extra_env = terminal_panel.update(cx, |terminal_panel, _| {
++                terminal_panel.terminal_control_env()
++            })?;
+             let terminal = if force_local {
+                 project
+-                    .update(cx, |project, cx| project.create_local_terminal(cx))
++                    .update(cx, |project, cx| {
++                        project.create_local_terminal(extra_env, cx)
++                    })
+                     .await
+             } else {
+                 project
+-                    .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
++                    .update(cx, |project, cx| {
++                        project.create_terminal_shell(cwd, extra_env, cx)
++                    })
+                     .await
+             };
+ 
+@@ -1727,6 +1932,113 @@ mod tests {
+     use settings::SettingsStore;
+     use workspace::MultiWorkspace;
+ 
++    #[test]
++    fn terminal_control_context_env_overrides_stale_workspace_token() {
++        let context = terminal_launcher::TerminalControlContext {
++            socket_path: PathBuf::from("/tmp/zed-control.sock"),
++            workspace_token: "panel-a".into(),
++        };
++        let mut env = HashMap::from_iter([
++            ("KEEP".into(), "yes".into()),
++            (
++                terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV.to_string(),
++                "stale".into(),
++            ),
++        ]);
++        // Same merge TerminalPanel::apply_terminal_control performs.
++        env.extend(context.env());
++
++        assert_eq!(env.get("KEEP"), Some(&"yes".into()));
++        assert_eq!(
++            env.get(terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV),
++            Some(&"panel-a".into()),
++        );
++        assert_eq!(
++            env.get(terminal_launcher::TERMINAL_CONTROL_SOCKET_ENV),
++            Some(&"/tmp/zed-control.sock".into()),
++        );
++    }
++
++    #[gpui::test]
++    async fn spawn_task_applies_panel_terminal_control_env(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        init_test(cx);
++        let fs = FakeFs::new(cx.executor());
++        let project = Project::test(fs, [], cx).await;
++        let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project, window, cx));
++        let terminal_panel = window
++            .update(cx, |multi_workspace, window, cx| {
++                multi_workspace.workspace().update(cx, |workspace, cx| {
++                    let panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
++                    workspace.add_panel(panel.clone(), window, cx);
++                    panel
++                })
++            })
++            .unwrap();
++
++        let (token, socket) = terminal_panel.read_with(cx, |panel, _| {
++            let env = panel.terminal_control_env();
++            (
++                env.get(terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV)
++                    .cloned(),
++                env.get(terminal_launcher::TERMINAL_CONTROL_SOCKET_ENV)
++                    .cloned(),
++            )
++        });
++        assert!(token.is_some());
++        assert!(socket.is_some());
++
++        let mut task_env = HashMap::from_iter([
++            ("KEEP".into(), "yes".into()),
++            (
++                terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV.to_string(),
++                "stale".into(),
++            ),
++        ]);
++        terminal_panel.update(cx, |panel, _| {
++            panel.apply_terminal_control(&mut task_env);
++        });
++
++        assert_eq!(task_env.get("KEEP"), Some(&"yes".into()));
++        assert_eq!(
++            task_env.get(terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV),
++            token.as_ref(),
++        );
++        assert_eq!(
++            task_env.get(terminal_launcher::TERMINAL_CONTROL_SOCKET_ENV),
++            socket.as_ref(),
++        );
++    }
++
++    #[test]
++    fn prepare_task_for_spawn_keeps_existing_env_when_panel_extends() {
++        let input = SpawnInTerminal {
++            env: HashMap::from_iter([
++                ("KEEP".into(), "yes".into()),
++                ("ZED_TERMINAL_CONTROL_WORKSPACE".into(), "stale".into()),
++            ]),
++            ..SpawnInTerminal::default()
++        };
++        let mut task = prepare_task_for_spawn(&input, &Shell::System, false);
++        let context = terminal_launcher::TerminalControlContext {
++            socket_path: PathBuf::from("/tmp/zed-control.sock"),
++            workspace_token: "panel-a".into(),
++        };
++        // Mirror TerminalPanel::apply_terminal_control.
++        task.env.extend(context.env());
++
++        assert_eq!(task.env.get("KEEP"), Some(&"yes".into()));
++        assert_eq!(
++            task.env
++                .get(terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV),
++            Some(&"panel-a".into()),
++        );
++        assert_eq!(
++            task.env.get(terminal_launcher::TERMINAL_CONTROL_SOCKET_ENV),
++            Some(&"/tmp/zed-control.sock".into()),
++        );
++    }
++
+     #[test]
+     fn test_prepare_empty_task() {
+         let input = SpawnInTerminal::default();
+@@ -2047,7 +2359,7 @@ mod tests {
+             .update(cx, |multi_workspace, window, cx| {
+                 multi_workspace.workspace().update(cx, |workspace, cx| {
+                     TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+-                        project.create_terminal_shell(None, cx)
++                        project.create_terminal_shell(None, HashMap::default(), cx)
+                     })
+                 })
+             })
+@@ -2216,7 +2528,7 @@ mod tests {
+             .update(cx, |multi_workspace, window, cx| {
+                 multi_workspace.workspace().update(cx, |workspace, cx| {
+                     TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+-                        project.create_terminal_shell(None, cx)
++                        project.create_terminal_shell(None, HashMap::default(), cx)
+                     })
+                 })
+             })
+@@ -2306,7 +2618,7 @@ mod tests {
+             .update(cx, |multi_workspace, window, cx| {
+                 multi_workspace.workspace().update(cx, |workspace, cx| {
+                     TerminalPanel::add_center_terminal(workspace, window, cx, |project, cx| {
+-                        project.create_terminal_shell(None, cx)
++                        project.create_terminal_shell(None, HashMap::default(), cx)
+                     })
+                 })
+             })
+diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
+index 3dad6134174ae14b1b14cb344150e78e499a494d..6f5c72866e2520fc82ee05d545f8afb93a9c9c05 100644
+--- a/crates/terminal_view/src/terminal_view.rs
++++ b/crates/terminal_view/src/terminal_view.rs
+@@ -1,13 +1,16 @@
+ mod persistence;
+ pub mod terminal_element;
++mod terminal_launcher;
+ pub mod terminal_panel;
+ mod terminal_path_like_target;
+ pub mod terminal_scrollbar;
+ 
++use collections::HashMap;
+ use editor::{
+     Editor, EditorSettings, actions::SelectAll, blink_manager::BlinkManager,
+     ui_scrollbar_settings_from_raw,
+ };
++use futures::channel::oneshot;
+ use gpui::{
+     Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
+     FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
+@@ -105,6 +108,7 @@ actions!(
+ pub struct RenameTerminal;
+ 
+ pub fn init(cx: &mut App) {
++    terminal_launcher::init(cx);
+     terminal_panel::init(cx);
+ 
+     register_serializable_item::<TerminalView>(cx);
+@@ -220,11 +224,15 @@ impl TerminalView {
+     ) {
+         let local = action.local;
+         let working_directory = default_working_directory(workspace, cx);
++        let extra_env = workspace
++            .panel::<TerminalPanel>(cx)
++            .map(|panel| panel.read(cx).terminal_control_env())
++            .unwrap_or_default();
+         TerminalPanel::add_center_terminal(workspace, window, cx, move |project, cx| {
+             if local {
+-                project.create_local_terminal(cx)
++                project.create_local_terminal(extra_env, cx)
+             } else {
+-                project.create_terminal_shell(working_directory, cx)
++                project.create_terminal_shell(working_directory, extra_env, cx)
+             }
+         })
+         .detach_and_log_err(cx);
+@@ -1745,11 +1753,17 @@ impl Item for TerminalView {
+         window: &mut Window,
+         cx: &mut Context<Self>,
+     ) -> Task<Option<Entity<Self>>> {
++        let extra_env = self
++            .workspace
++            .upgrade()
++            .and_then(|workspace| workspace.read(cx).panel::<TerminalPanel>(cx))
++            .map(|panel| panel.read(cx).terminal_control_env())
++            .unwrap_or_default();
+         let Ok(terminal) = self.project.update(cx, |project, cx| {
+             let cwd = project
+                 .active_project_directory(cx)
+                 .map(|it| it.to_path_buf());
+-            project.clone_terminal(self.terminal(), cx, cwd)
++            project.clone_terminal(self.terminal(), cx, cwd, extra_env)
+         }) else {
+             return Task::ready(None);
+         };
+@@ -1900,57 +1914,172 @@ impl SerializableItem for TerminalView {
+         window: &mut Window,
+         cx: &mut App,
+     ) -> Task<anyhow::Result<Entity<Self>>> {
++        // Center-item restore can race panel load. Resolve launcher env after the
++        // workspace terminal panel is available so shells never spawn with empty env.
+         window.spawn(cx, async move |cx| {
+-            let (cwd, custom_title) = cx
+-                .update(|_window, cx| {
+-                    let db = TerminalDb::global(cx);
+-                    let from_db = db
+-                        .get_working_directory(item_id, workspace_id)
+-                        .log_err()
+-                        .flatten();
+-                    let cwd = if from_db
+-                        .as_ref()
+-                        .is_some_and(|from_db| !from_db.as_os_str().is_empty())
+-                    {
+-                        from_db
+-                    } else {
+-                        workspace
+-                            .upgrade()
+-                            .and_then(|workspace| default_working_directory(workspace.read(cx), cx))
+-                    };
+-                    let custom_title = db
+-                        .get_custom_title(item_id, workspace_id)
+-                        .log_err()
+-                        .flatten()
+-                        .filter(|title| !title.trim().is_empty());
+-                    (cwd, custom_title)
+-                })
+-                .ok()
+-                .unwrap_or((None, None));
++            let extra_env = terminal_control_env_for_workspace(&workspace, cx).await;
++            deserialize_terminal_view(project, workspace, workspace_id, item_id, extra_env, cx)
++                .await
++        })
++    }
++}
+ 
+-            let terminal = project
+-                .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
+-                .await?;
+-            cx.update(|window, cx| {
+-                cx.new(|cx| {
+-                    let mut view = TerminalView::new(
+-                        terminal,
+-                        workspace,
+-                        Some(workspace_id),
+-                        project.downgrade(),
+-                        window,
+-                        cx,
+-                    );
+-                    if custom_title.is_some() {
+-                        view.custom_title = custom_title;
+-                    }
+-                    view
+-                })
+-            })
++impl TerminalView {
++    pub(crate) fn deserialize_with_env(
++        project: Entity<Project>,
++        workspace: WeakEntity<Workspace>,
++        workspace_id: WorkspaceId,
++        item_id: workspace::ItemId,
++        extra_env: HashMap<String, String>,
++        window: &mut Window,
++        cx: &mut App,
++    ) -> Task<anyhow::Result<Entity<Self>>> {
++        window.spawn(cx, async move |cx| {
++            deserialize_terminal_view(project, workspace, workspace_id, item_id, extra_env, cx)
++                .await
+         })
+     }
+ }
+ 
++async fn deserialize_terminal_view(
++    project: Entity<Project>,
++    workspace: WeakEntity<Workspace>,
++    workspace_id: WorkspaceId,
++    item_id: workspace::ItemId,
++    extra_env: HashMap<String, String>,
++    cx: &mut gpui::AsyncWindowContext,
++) -> anyhow::Result<Entity<TerminalView>> {
++    let (cwd, custom_title) = cx
++        .update(|_window, cx| {
++            let db = TerminalDb::global(cx);
++            let from_db = db
++                .get_working_directory(item_id, workspace_id)
++                .log_err()
++                .flatten();
++            let cwd = if from_db
++                .as_ref()
++                .is_some_and(|from_db| !from_db.as_os_str().is_empty())
++            {
++                from_db
++            } else {
++                workspace
++                    .upgrade()
++                    .and_then(|workspace| default_working_directory(workspace.read(cx), cx))
++            };
++            let custom_title = db
++                .get_custom_title(item_id, workspace_id)
++                .log_err()
++                .flatten()
++                .filter(|title| !title.trim().is_empty());
++            (cwd, custom_title)
++        })
++        .ok()
++        .unwrap_or((None, None));
++
++    let terminal = project
++        .update(cx, |project, cx| {
++            project.create_terminal_shell(cwd, extra_env, cx)
++        })
++        .await?;
++    cx.update(|window, cx| {
++        cx.new(|cx| {
++            let mut view = TerminalView::new(
++                terminal,
++                workspace,
++                Some(workspace_id),
++                project.downgrade(),
++                window,
++                cx,
++            );
++            if custom_title.is_some() {
++                view.custom_title = custom_title;
++            }
++            view
++        })
++    })
++}
++
++pub async fn terminal_control_env_for_workspace(
++    workspace: &WeakEntity<Workspace>,
++    cx: &mut gpui::AsyncWindowContext,
++) -> HashMap<String, String> {
++    let Some(workspace_entity) = workspace.upgrade() else {
++        return HashMap::default();
++    };
++
++    let state = cx.update(|_, cx| {
++        let workspace = workspace_entity.read(cx);
++        (
++            workspace
++                .panel::<TerminalPanel>(cx)
++                .map(|panel| panel.read(cx).terminal_control_env()),
++            workspace.panels_initialized(),
++        )
++    });
++    match state {
++        Ok((Some(env), _)) => return env,
++        Ok((None, true)) | Err(_) => return HashMap::default(),
++        Ok((None, false)) => {}
++    }
++
++    let (tx, rx) = oneshot::channel();
++    let mut tx = Some(tx);
++    let subscription = cx.subscribe(&workspace_entity, move |workspace, event, cx| {
++        if !matches!(
++            event,
++            workspace::Event::PanelAdded(_) | workspace::Event::PanelsInitialized
++        ) {
++            return;
++        }
++        let env = workspace
++            .read(cx)
++            .panel::<TerminalPanel>(cx)
++            .map(|panel| panel.read(cx).terminal_control_env());
++        if env.is_none() && !matches!(event, workspace::Event::PanelsInitialized) {
++            return;
++        }
++        if let Some(tx) = tx.take() {
++            let _ = tx.send(env.unwrap_or_default());
++        }
++    });
++    let (released_tx, released_rx) = oneshot::channel();
++    let release_subscription = match cx.update(|_, cx| {
++        cx.observe_release(&workspace_entity, move |_, _| {
++            let _ = released_tx.send(());
++        })
++    }) {
++        Ok(subscription) => subscription,
++        Err(_) => return HashMap::default(),
++    };
++
++    // Panel initialization may have completed between the initial lookup and
++    // subscription registration.
++    match cx.update(|_, cx| {
++        let workspace = workspace_entity.read(cx);
++        (
++            workspace
++                .panel::<TerminalPanel>(cx)
++                .map(|panel| panel.read(cx).terminal_control_env()),
++            workspace.panels_initialized(),
++        )
++    }) {
++        Ok((Some(env), _)) => return env,
++        Ok((None, true)) | Err(_) => return HashMap::default(),
++        Ok((None, false)) => {}
++    }
++
++    // Do not pin the workspace while waiting. Workspace release cancels the
++    // wait and preserves the silent empty-environment fallback.
++    drop(workspace_entity);
++    let env = futures::select! {
++        env = futures::FutureExt::fuse(rx) => env.unwrap_or_default(),
++        _ = futures::FutureExt::fuse(released_rx) => HashMap::default(),
++    };
++    drop(subscription);
++    drop(release_subscription);
++    env
++}
++
+ impl SearchableItem for TerminalView {
+     type Match = Range;
+ 
+@@ -2883,6 +3012,88 @@ mod tests {
+             .unwrap();
+     }
+ 
++    #[gpui::test]
++    async fn deserialize_waits_for_terminal_panel_env(cx: &mut TestAppContext) {
++        cx.executor().allow_parking();
++        cx.update(|cx| {
++            crate::init(cx);
++        });
++        let (_project, workspace, window) = init_test_with_window(cx).await;
++
++        // No terminal panel yet: resolving env must wait until one is added.
++        let workspace_weak = workspace.downgrade();
++        let env_task = window
++            .update(cx, |_, window, cx| {
++                window.spawn(cx, async move |cx| {
++                    super::terminal_control_env_for_workspace(&workspace_weak, cx).await
++                })
++            })
++            .unwrap();
++
++        // Yield so the waiter is subscribed before the panel is added.
++        cx.executor().run_until_parked();
++
++        let panel = window
++            .update(cx, |multi_workspace, window, cx| {
++                multi_workspace.workspace().update(cx, |workspace, cx| {
++                    let panel = cx.new(|cx| TerminalPanel::new(workspace, window, cx));
++                    workspace.add_panel(panel.clone(), window, cx);
++                    panel
++                })
++            })
++            .unwrap();
++
++        let expected = panel.read_with(cx, |panel, _| panel.terminal_control_env());
++        assert!(
++            expected.contains_key(terminal_launcher::TERMINAL_CONTROL_SOCKET_ENV),
++            "panel should advertise launcher socket env"
++        );
++        assert!(
++            expected.contains_key(terminal_launcher::TERMINAL_CONTROL_WORKSPACE_ENV),
++            "panel should advertise launcher workspace env"
++        );
++
++        let resolved = env_task.await;
++        assert_eq!(resolved, expected);
++
++        // Immediate path: panel already present.
++        let workspace_weak = workspace.downgrade();
++        let immediate = window
++            .update(cx, |_, window, cx| {
++                window.spawn(cx, async move |cx| {
++                    super::terminal_control_env_for_workspace(&workspace_weak, cx).await
++                })
++            })
++            .unwrap()
++            .await;
++        assert_eq!(immediate, expected);
++    }
++
++    #[gpui::test]
++    async fn terminal_control_env_falls_back_when_panel_initialization_finishes(
++        cx: &mut TestAppContext,
++    ) {
++        cx.executor().allow_parking();
++        cx.update(|cx| {
++            crate::init(cx);
++        });
++        let (_project, workspace, window) = init_test_with_window(cx).await;
++
++        let workspace_weak = workspace.downgrade();
++        let env_task = window
++            .update(cx, |_, window, cx| {
++                window.spawn(cx, async move |cx| {
++                    super::terminal_control_env_for_workspace(&workspace_weak, cx).await
++                })
++            })
++            .unwrap();
++        cx.executor().run_until_parked();
++
++        workspace.update(cx, |workspace, cx| workspace.mark_panels_initialized(cx));
++
++        assert!(env_task.await.is_empty());
++    }
++
+     // Terminal rename tests
+ 
+     #[gpui::test]
+@@ -2892,7 +3103,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+@@ -2922,7 +3135,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+@@ -2953,7 +3168,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+@@ -2990,7 +3207,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+@@ -3022,7 +3241,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+@@ -3135,7 +3356,9 @@ mod tests {
+         let (project, workspace) = init_test(cx).await;
+ 
+         let terminal = project
+-            .update(cx, |project, cx| project.create_terminal_shell(None, cx))
++            .update(cx, |project, cx| {
++                project.create_terminal_shell(None, HashMap::default(), cx)
++            })
+             .await
+             .unwrap();
+ 
+diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
+index 699e1ca58310362fec27988d73dd3a75ab46a6a4..8909a00185605d4c6bc9132ab1e72b1aa1d69de7 100644
+--- a/crates/workspace/src/workspace.rs
++++ b/crates/workspace/src/workspace.rs
+@@ -1309,6 +1309,7 @@ pub enum Event {
+     ModalOpened,
+     Activate,
+     PanelAdded(AnyView),
++    PanelsInitialized,
+     WorktreeCreationChanged,
+ }
+ 
+@@ -1426,6 +1427,7 @@ pub struct Workspace {
+     open_in_dev_container: bool,
+     _dev_container_task: Option<Task<Result<()>>>,
+     _panels_task: Option<Task<Result<()>>>,
++    panels_initialized: bool,
+     sidebar_focus_handle: Option<FocusHandle>,
+     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
+     /// Shared with the parent `MultiWorkspace` and any sibling workspaces: holds
+@@ -1845,6 +1847,7 @@ impl Workspace {
+             bottom_dock,
+             right_dock,
+             _panels_task: None,
++            panels_initialized: false,
+             project: project.clone(),
+             follower_states: Default::default(),
+             last_leaders_by_pane: Default::default(),
+@@ -2635,6 +2638,15 @@ impl Workspace {
+         self._panels_task.take()
+     }
+ 
++    pub fn panels_initialized(&self) -> bool {
++        self.panels_initialized
++    }
++
++    pub fn mark_panels_initialized(&mut self, cx: &mut Context<Self>) {
++        self.panels_initialized = true;
++        cx.emit(Event::PanelsInitialized);
++    }
++
+     pub fn user_store(&self) -> &Entity<UserStore> {
+         &self.app_state.user_store
+     }
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 79abe8949ee30f815b6706d9b324ff873bb38ce8..3b302738ae217e2a8f02abb804c7e38f5f64fcbc 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -804,9 +804,13 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
+             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
+             add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
+             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
+-            initialize_agent_panel(workspace_handle, cx.clone()).map(|r| r.log_err()),
++            initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
+         );
+ 
++        workspace_handle
++            .update(cx, |workspace, cx| workspace.mark_panels_initialized(cx))
++            .log_err();
++
+         anyhow::Ok(())
+     })
+ }

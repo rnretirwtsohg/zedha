@@ -34,7 +34,7 @@ fi
   script/bundle-mac "$target_triple"
 )
 
-source_dmg="$source_dir/target/$target_triple/release/Zed-$arch_suffix.dmg"
+source_dmg="$source_dir/target/$target_triple/release/Zedha-$arch_suffix.dmg"
 output_dmg="$artifact_dir/Zedha-$arch_suffix.dmg"
 
 if [[ ! -f "$source_dmg" ]]; then

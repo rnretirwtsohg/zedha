@@ -1,0 +1,762 @@
+From zedha-brand-v1.12.0 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] Brand stable macOS build as Zedha
+
+Keep product identity separate from terminal launcher behavior so either
+concern can be refreshed or removed independently.
+
+Generated against Zed v1.12.0 (f96212f2c50f54d93712fa130d6226b1ce7d76b5).
+---
+
+diff --git a/crates/agent_skills/agent_skills.rs b/crates/agent_skills/agent_skills.rs
+index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d28c80133 100644
+--- a/crates/agent_skills/agent_skills.rs
++++ b/crates/agent_skills/agent_skills.rs
+@@ -799,19 +799,19 @@ pub fn is_agents_skills_path(path: &Path) -> bool {
+     false
+ }
+ 
+-/// The `zed://` scheme used by share links.
+-const SKILL_SHARE_LINK_SCHEME: &str = "zed";
+-/// The host (the part after `zed://`) that identifies a skill share link.
++/// The `zedha://` scheme used by share links.
++const SKILL_SHARE_LINK_SCHEME: &str = "zedha";
++/// The host (the part after `zedha://`) that identifies a skill share link.
+ const SKILL_SHARE_LINK_HOST: &str = "skill";
+ /// The query parameter that carries the embedded `SKILL.md` payload.
+ const SKILL_SHARE_LINK_DATA_PARAM: &str = "data";
+ 
+-/// The `zed://` deep-link prefix for a shared skill. Opening a link with this
++/// The `zedha://` deep-link prefix for a shared skill. Opening a link with this
+ /// prefix prompts the recipient to review and install the embedded skill.
+ pub const SKILL_SHARE_LINK_PREFIX: &str =
+     concatcp!(SKILL_SHARE_LINK_SCHEME, "://", SKILL_SHARE_LINK_HOST);
+ 
+-/// Build a shareable `zed://skill?data=…` link that fully embeds the given
++/// Build a shareable `zedha://skill?data=…` link that fully embeds the given
+ /// `SKILL.md` file contents.
+ ///
+ /// The contents are base64url-encoded (no padding) so the link is
+@@ -827,7 +827,7 @@ pub fn encode_skill_share_link(skill_file_content: &str) -> String {
+     url.into()
+ }
+ 
+-/// Recover the `SKILL.md` contents embedded in a `zed://skill?data=…` link
++/// Recover the `SKILL.md` contents embedded in a `zedha://skill?data=…` link
+ /// produced by [`encode_skill_share_link`].
+ pub fn decode_skill_share_link(link: &str) -> Result<String> {
+     use base64::Engine as _;
+@@ -2170,7 +2170,7 @@ description: A skill with no body content
+             "---\nname: my-skill\ndescription: Does a thing.\n---\n\n## Steps\n\nDo the thing.\n";
+         let link = encode_skill_share_link(content);
+         let data = link
+-            .strip_prefix("zed://skill?data=")
++            .strip_prefix("zedha://skill?data=")
+             .expect("link should start with the skill share prefix");
+         // base64url (no-pad) output must not require percent-encoding.
+         assert!(!data.contains('+') && !data.contains('/') && !data.contains('='));
+@@ -2179,9 +2179,9 @@ description: A skill with no body content
+ 
+     #[test]
+     fn decode_skill_share_link_rejects_non_skill_links() {
+-        assert!(decode_skill_share_link("zed://settings/agent.skills").is_err());
+-        assert!(decode_skill_share_link("zed://skill").is_err());
+-        assert!(decode_skill_share_link("zed://skill?other=1").is_err());
+-        assert!(decode_skill_share_link("zed://skill?data=!!!notbase64").is_err());
++        assert!(decode_skill_share_link("zedha://settings/agent.skills").is_err());
++        assert!(decode_skill_share_link("zedha://skill").is_err());
++        assert!(decode_skill_share_link("zedha://skill?other=1").is_err());
++        assert!(decode_skill_share_link("zedha://skill?data=!!!notbase64").is_err());
+     }
+ }
+diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+index 565f97ff2305551801429bc2adc7dfc21f0c35c8..1b64a53bb45ec9a59967bd9f15e5146fdc917e95 100644
+--- a/crates/cli/src/main.rs
++++ b/crates/cli/src/main.rs
+@@ -31,7 +31,7 @@ use walkdir::WalkDir;
+ 
+ use std::io::IsTerminal;
+ 
+-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
++const URL_PREFIX: [&'static str; 5] = ["zedha://", "http://", "https://", "file://", "ssh://"];
+ 
+ struct Detect;
+ 
+@@ -48,21 +48,21 @@ trait InstalledApp {
+ 
+ #[derive(Parser, Debug)]
+ #[command(
+-    name = "zed",
++    name = "zedha",
+     disable_version_flag = true,
+-    before_help = "The Zed CLI binary.
+-This CLI is a separate binary that invokes Zed.
++    before_help = "The Zedha CLI binary.
++This CLI is a separate binary that invokes Zedha.
+ 
+ Examples:
+-    `zed`
+-          Simply opens Zed
+-    `zed --foreground`
++    `zedha`
++          Simply opens Zedha
++    `zedha --foreground`
+           Runs in foreground (shows all logs)
+-    `zed path-to-your-project`
+-          Open your project in Zed
+-    `zed -n path-to-file `
++    `zedha path-to-your-project`
++          Open your project in Zedha
++    `zedha -n path-to-file `
+           Open file/folder in a new window",
+-    after_help = "To read from stdin, append '-', e.g. 'ps axf | zed -'"
++    after_help = "To read from stdin, append '-', e.g. 'ps axf | zedha -'"
+ )]
+ struct Args {
+     /// Wait for all of the given paths to be opened/closed before exiting.
+@@ -1415,7 +1415,7 @@ mod mac_os {
+             user_data_dir: Option<&str>,
+         ) -> io::Result<ExitStatus> {
+             let path = match self {
+-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
++                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zedha"),
+                 Bundle::LocalPath { executable, .. } => executable.clone(),
+             };
+ 
+@@ -1429,7 +1429,7 @@ mod mac_os {
+ 
+         fn path(&self) -> PathBuf {
+             match self {
+-                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zed"),
++                Bundle::App { app_bundle, .. } => app_bundle.join("Contents/MacOS/zedha"),
+                 Bundle::LocalPath { executable, .. } => executable.clone(),
+             }
+         }
+diff --git a/crates/client/src/client.rs b/crates/client/src/client.rs
+index 2c8dfa8ba47ef7eced841f6d965d576f30a02e6a..2f66c8502e93428c61c6215315d87b50cfe6ad4c 100644
+--- a/crates/client/src/client.rs
++++ b/crates/client/src/client.rs
+@@ -1936,13 +1936,13 @@ impl ProtoClient for Client {
+     }
+ }
+ 
+-/// prefix for the zed:// url scheme
+-pub const ZED_URL_SCHEME: &str = "zed";
++/// Prefix for the zedha:// URL scheme.
++pub const ZED_URL_SCHEME: &str = "zedha";
+ 
+ /// A parsed Zed link that can be handled internally by the application.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub enum ZedLink {
+-    /// Join a channel: `zed.dev/channel/channel-name-123` or `zed://channel/channel-name-123`
++    /// Join a channel: `zed.dev/channel/channel-name-123` or `zedha://channel/channel-name-123`
+     Channel { channel_id: u64 },
+     /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
+     ChannelNotes {
+diff --git a/crates/client/src/zed_urls.rs b/crates/client/src/zed_urls.rs
+index d9cd62552265d41bbf17f7599ac3fa7e8869f444..5fa2d1b40aa1849886d7558db44d29c88884888c 100644
+--- a/crates/client/src/zed_urls.rs
++++ b/crates/client/src/zed_urls.rs
+@@ -8,7 +8,7 @@ use gpui::App;
+ use release_channel::ReleaseChannel;
+ use settings::Settings;
+ 
+-use crate::ClientSettings;
++use crate::{ClientSettings, ZED_URL_SCHEME};
+ 
+ fn server_url(cx: &App) -> &str {
+     &ClientSettings::get_global(cx).server_url
+@@ -99,5 +99,5 @@ pub fn acp_registry_blog(cx: &App) -> String {
+ }
+ 
+ pub fn shared_agent_thread_url(session_id: &str) -> String {
+-    format!("zed://agent/shared/{}", session_id)
++    format!("{ZED_URL_SCHEME}://agent/shared/{session_id}")
+ }
+diff --git a/crates/install_cli/src/install_cli_binary.rs b/crates/install_cli/src/install_cli_binary.rs
+index a88816ace138f9119ca7b8a88f9fd3569bbb0ef9..fec08add1a9bdec2fc156f6c6cda345d1fdf9bb9 100644
+--- a/crates/install_cli/src/install_cli_binary.rs
++++ b/crates/install_cli/src/install_cli_binary.rs
+@@ -12,7 +12,7 @@ use workspace::{Toast, Workspace};
+ actions!(
+     cli,
+     [
+-        /// Installs the Zed CLI tool to the system PATH.
++        /// Installs the Zedha CLI tool to the system PATH.
+         InstallCliBinary,
+     ]
+ );
+@@ -25,7 +25,7 @@ const CANT_INSTALL_DOCS_URL: &str = "https://zed.dev/docs/macos#cant-install-cli
+ /// commonly because the user is not an admin.
+ async fn install_script(cx: &AsyncApp) -> Result<Option<PathBuf>> {
+     let cli_path = cx.update(|cx| cx.path_for_auxiliary_executable("cli"))?;
+-    let link_path = Path::new("/usr/local/bin/zed");
++    let link_path = Path::new("/usr/local/bin/zedha");
+     let bin_dir_path = link_path.parent().unwrap();
+ 
+     // Don't re-create symlink if it points to the same CLI binary.
+@@ -98,7 +98,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
+             // The user dismissed the administrator prompt; nothing to do.
+             Ok(None) => return Ok(()),
+             Err(error) => {
+-                log::error!("failed to install zed CLI: {error:#}");
++                log::error!("failed to install zedha CLI: {error:#}");
+                 workspace.update(cx, |workspace, cx| {
+                     struct CliInstallFailed;
+ 
+@@ -108,10 +108,10 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
+                         |cx| {
+                             cx.new(|cx| {
+                                 MessageNotification::new(
+-                                    "You can add `zed` to your PATH manually.",
++                                    "You can add `zedha` to your PATH manually.",
+                                     cx,
+                                 )
+-                                .with_title("Couldn't install the Zed CLI")
++                                .with_title("Couldn't install the Zedha CLI")
+                                 .more_info_message("Show me how")
+                                 .more_info_url(CANT_INSTALL_DOCS_URL)
+                             })
+@@ -129,7 +129,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
+                 Toast::new(
+                     NotificationId::unique::<InstalledZedCli>(),
+                     format!(
+-                        "Installed `zed` to {}. You can launch {} from your terminal.",
++                        "Installed `zedha` to {}. You can launch {} from your terminal.",
+                         path.to_string_lossy(),
+                         ReleaseChannel::global(cx).display_name()
+                     ),
+@@ -140,5 +140,5 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
+         register_zed_scheme(cx).await.log_err();
+         Ok(())
+     })
+-    .detach_and_prompt_err("Cannot install the Zed CLI", window, cx, |_, _, _| None);
++    .detach_and_prompt_err("Cannot install the Zedha CLI", window, cx, |_, _, _| None);
+ }
+diff --git a/crates/install_cli/src/register_zed_scheme.rs b/crates/install_cli/src/register_zed_scheme.rs
+index 048b2dd50ab5355872de6718284106ba19c89b9a..74764313e269563d0a028853a3ce02b10cd6386a 100644
+--- a/crates/install_cli/src/register_zed_scheme.rs
++++ b/crates/install_cli/src/register_zed_scheme.rs
+@@ -4,7 +4,7 @@ use gpui::{AsyncApp, actions};
+ actions!(
+     cli,
+     [
+-        /// Registers the zed:// URL scheme handler.
++        /// Registers the zedha:// URL scheme handler.
+         RegisterZedScheme
+     ]
+ );
+diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
+index 9c16f1db289585280e7919297c43085a5a76fdf2..8f65260ef9a6c28ded1e2e412db6977cec1245c6 100644
+--- a/crates/paths/src/paths.rs
++++ b/crates/paths/src/paths.rs
+@@ -15,7 +15,7 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
+ /// and state directory paths.
+ ///
+ /// Forks should change this to avoid colliding with Zed's user data.
+-pub const APP_NAME: &str = "Zed";
++pub const APP_NAME: &str = "Zedha";
+ 
+ /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
+ /// Linux/FreeBSD and the macOS `~/.config` fallback.
+diff --git a/crates/release_channel/src/lib.rs b/crates/release_channel/src/lib.rs
+index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec6b5c3341 100644
+--- a/crates/release_channel/src/lib.rs
++++ b/crates/release_channel/src/lib.rs
+@@ -185,7 +185,7 @@ impl ReleaseChannel {
+ 
+     /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
+     pub fn poll_for_updates(&self) -> bool {
+-        !matches!(self, ReleaseChannel::Dev)
++        matches!(self, ReleaseChannel::Nightly | ReleaseChannel::Preview)
+     }
+ 
+     /// Returns the display name for this [`ReleaseChannel`].
+@@ -194,7 +194,7 @@ impl ReleaseChannel {
+             ReleaseChannel::Dev => "Zed Dev",
+             ReleaseChannel::Nightly => "Zed Nightly",
+             ReleaseChannel::Preview => "Zed Preview",
+-            ReleaseChannel::Stable => "Zed",
++            ReleaseChannel::Stable => "Zedha",
+         }
+     }
+ 
+@@ -204,7 +204,7 @@ impl ReleaseChannel {
+             ReleaseChannel::Dev => "dev",
+             ReleaseChannel::Nightly => "nightly",
+             ReleaseChannel::Preview => "preview",
+-            ReleaseChannel::Stable => "stable",
++            ReleaseChannel::Stable => "zedha",
+         }
+     }
+ 
+@@ -216,7 +216,7 @@ impl ReleaseChannel {
+             ReleaseChannel::Dev => "dev.zed.Zed-Dev",
+             ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
+             ReleaseChannel::Preview => "dev.zed.Zed-Preview",
+-            ReleaseChannel::Stable => "dev.zed.Zed",
++            ReleaseChannel::Stable => "me.ghostwriternr.Zedha",
+         }
+     }
+ 
+diff --git a/crates/settings_ui/src/settings_ui.rs b/crates/settings_ui/src/settings_ui.rs
+index f3cf844d78e66c4997cf6c71e1f0b9f1e002a5bb..617cc1f100a2254a11d01697c8c4923b422a7a6a 100644
+--- a/crates/settings_ui/src/settings_ui.rs
++++ b/crates/settings_ui/src/settings_ui.rs
+@@ -1549,7 +1549,7 @@ fn render_settings_item_link(
+                 .tooltip(Tooltip::text("Copy Link"))
+                 .when_some(json_path, |this, path| {
+                     this.on_click(cx.listener(move |this, _, _, cx| {
+-                        let link = format!("zed://settings/{}", path);
++                        let link = format!("zedha://settings/{}", path);
+                         cx.write_to_clipboard(ClipboardItem::new_string(link));
+                         this.last_copied_link_path = Some(path);
+                         cx.notify();
+diff --git a/crates/terminal/src/alacritty/hyperlinks.rs b/crates/terminal/src/alacritty/hyperlinks.rs
+index 1dbec598c098d786c47cfd9e922849eb473b7d63..ec2e8d614679b0bebfdb01a46ae1798ee520bdc3 100644
+--- a/crates/terminal/src/alacritty/hyperlinks.rs
++++ b/crates/terminal/src/alacritty/hyperlinks.rs
+@@ -19,7 +19,7 @@ use util::paths::{PathStyle, UrlExt};
+ 
+ use crate::Range;
+ 
+-const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|zed://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#;
++const URL_REGEX: &str = r#"(ipfs:|ipns:|magnet:|mailto:|gemini://|gopher://|https://|http://|news:|file://|git://|ssh:|ftp://|zed://|zedha://)[^\u{0000}-\u{001F}\u{007F}-\u{009F}<>"\s{-}\^⟨⟩`']+"#;
+ const WIDE_CHAR_SPACERS: Flags =
+     Flags::from_bits(Flags::LEADING_WIDE_CHAR_SPACER.bits() | Flags::WIDE_CHAR_SPACER.bits())
+         .unwrap();
+@@ -523,6 +523,11 @@ mod tests {
+             "open zed://channel/the-channel and zed://settings/theme now",
+             vec!["zed://channel/the-channel", "zed://settings/theme"],
+         );
++        re_test(
++            URL_REGEX,
++            "open zedha://channel/the-channel and zedha://settings/theme now",
++            vec!["zedha://channel/the-channel", "zedha://settings/theme"],
++        );
+     }
+ 
+     #[test]
+diff --git a/crates/zed/Cargo.toml b/crates/zed/Cargo.toml
+index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1dba8861f72 100644
+--- a/crates/zed/Cargo.toml
++++ b/crates/zed/Cargo.toml
+@@ -6,7 +6,7 @@ version = "1.12.0"
+ publish.workspace = true
+ license = "GPL-3.0-or-later"
+ authors = ["Zed Team <hi@zed.dev>"]
+-default-run = "zed"
++default-run = "zedha"
+ 
+ [lints]
+ workspace = true
+@@ -54,7 +54,7 @@ visual-tests = [
+ ]
+ 
+ [[bin]]
+-name = "zed"
++name = "zedha"
+ path = "src/main.rs"
+ 
+ [[bin]]
+@@ -301,11 +301,11 @@ osx_url_schemes = ["zed"]
+ 
+ [package.metadata.bundle-stable]
+ icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+-identifier = "dev.zed.Zed"
+-name = "Zed"
++identifier = "me.ghostwriternr.Zedha"
++name = "Zedha"
+ osx_minimum_system_version = "10.15.7"
+ osx_info_plist_exts = ["resources/info/*"]
+-osx_url_schemes = ["zed"]
++osx_url_schemes = ["zedha"]
+ 
+ [package.metadata.cargo-machete]
+ ignored = ["profiling", "zstd", "tracing"]
+diff --git a/crates/zed/resources/info/DocumentTypes.plist b/crates/zed/resources/info/DocumentTypes.plist
+index 0a509d9ddcf283fd660d0b2d13641a0f85e3fc36..328c103a9a9948dcae4b7ecb5fa5688917742e82 100644
+--- a/crates/zed/resources/info/DocumentTypes.plist
++++ b/crates/zed/resources/info/DocumentTypes.plist
+@@ -19,7 +19,7 @@
+         <key>CFBundleTypeIconFile</key>
+         <string>Document</string>
+         <key>CFBundleTypeName</key>
+-        <string>Zed Text Document</string>
++        <string>Zedha Text Document</string>
+         <key>CFBundleTypeRole</key>
+         <string>Editor</string>
+         <key>CFBundleTypeOSTypes</key>
+diff --git a/crates/zed/resources/info/Permissions.plist b/crates/zed/resources/info/Permissions.plist
+index bded5a82e2c81d811b8186dde97736170a74b425..f07cceb0a5044a0b0f1388f957bb899d246e9805 100644
+--- a/crates/zed/resources/info/Permissions.plist
++++ b/crates/zed/resources/info/Permissions.plist
+@@ -1,24 +1,24 @@
+ <key>NSSystemAdministrationUsageDescription</key>
+-<string>The operation being performed by a program in Zed requires elevated permission.</string>
++<string>The operation being performed by a program in Zedha requires elevated permission.</string>
+ <key>NSAppleEventsUsageDescription</key>
+-<string>An application in Zed wants to use AppleScript.</string>
++<string>An application in Zedha wants to use AppleScript.</string>
+ <key>NSBluetoothAlwaysUsageDescription</key>
+-<string>An application in Zed wants to use Bluetooth.</string>
++<string>An application in Zedha wants to use Bluetooth.</string>
+ <key>NSCalendarsUsageDescription</key>
+-<string>An application in Zed wants to use Calendar data.</string>
++<string>An application in Zedha wants to use Calendar data.</string>
+ <key>NSCameraUsageDescription</key>
+-<string>An application in Zed wants to use the camera.</string>
++<string>An application in Zedha wants to use the camera.</string>
+ <key>NSContactsUsageDescription</key>
+-<string>An application in Zed wants to use your contacts.</string>
++<string>An application in Zedha wants to use your contacts.</string>
+ <key>NSLocationAlwaysUsageDescription</key>
+-<string>An application in Zed wants to use your location information, even in the background.</string>
++<string>An application in Zedha wants to use your location information, even in the background.</string>
+ <key>NSLocationUsageDescription</key>
+-<string>An application in Zed wants to use your location information.</string>
++<string>An application in Zedha wants to use your location information.</string>
+ <key>NSLocationWhenInUseUsageDescription</key>
+-<string>An application in Zed wants to use your location information while active.</string>
++<string>An application in Zedha wants to use your location information while active.</string>
+ <key>NSMicrophoneUsageDescription</key>
+-<string>An application in Zed wants to use your microphone.</string>
++<string>An application in Zedha wants to use your microphone.</string>
+ <key>NSSpeechRecognitionUsageDescription</key>
+-<string>An application in Zed wants to use speech recognition.</string>
++<string>An application in Zedha wants to use speech recognition.</string>
+ <key>NSRemindersUsageDescription</key>
+-<string>An application in Zed wants to use your reminders.</string>
++<string>An application in Zedha wants to use your reminders.</string>
+diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
+index eb933cc16e62b5f3a9d5c00dd8557cc4bc3981d7..f21c0986513b44abda5689a4553988674de040af 100644
+--- a/crates/zed/src/main.rs
++++ b/crates/zed/src/main.rs
+@@ -1041,7 +1041,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+                                 });
+                             } else {
+                                 log::warn!(
+-                                    "zed://agent received but the AgentPanel is not registered \
++                                    "zedha://agent received but the AgentPanel is not registered \
+                                      (is `disable_ai` enabled?)"
+                                 );
+                             }
+@@ -1666,14 +1666,14 @@ fn stdout_is_a_pty() -> bool {
+ }
+ 
+ #[derive(Parser, Debug)]
+-#[command(name = "zed", disable_version_flag = true, max_term_width = 100)]
++#[command(name = "zedha", disable_version_flag = true, max_term_width = 100)]
+ struct Args {
+     /// A sequence of space-separated paths or urls that you want to open.
+     ///
+     /// Use `path:line:row` syntax to open a file at a specific location.
+     /// Non-existing paths and directories will ignore `:line:row` suffix.
+     ///
+-    /// URLs can either be `file://` or `zed://` scheme, or relative to <https://zed.dev>.
++    /// URLs can either be `file://` or `zedha://` scheme, or relative to <https://zed.dev>.
+     paths_or_urls: Vec<String>,
+ 
+     /// Pairs of file paths to diff. Can be specified multiple times.
+@@ -1793,7 +1793,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
+         Ok(path) => format!("file://{}", path.display()),
+         Err(_) => {
+             if arg.starts_with("file://")
+-                || arg.starts_with("zed://")
++                || arg.starts_with("zedha://")
+                 || arg.starts_with("zed-cli://")
+                 || arg.starts_with("ssh://")
+                 || parse_zed_link(arg, cx).is_some()
+diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
+index 3b302738ae217e2a8f02abb804c7e38f5f64fcbc..ce930e7fe0d6a463b035c564cbed006c9e2ad2c0 100644
+--- a/crates/zed/src/zed.rs
++++ b/crates/zed/src/zed.rs
+@@ -1215,7 +1215,7 @@ fn register_actions(
+                         Toast::new(
+                             NotificationId::unique::<RegisterZedScheme>(),
+                             format!(
+-                                "zed:// links will now open in {}.",
++                                "zedha:// links will now open in {}.",
+                                 ReleaseChannel::global(cx).display_name()
+                             ),
+                         ),
+@@ -1225,7 +1225,7 @@ fn register_actions(
+                 Ok(())
+             })
+             .detach_and_prompt_err(
+-                "Error registering zed:// scheme",
++                "Error registering zedha:// scheme",
+                 window,
+                 cx,
+                 |_, _, _| None,
+diff --git a/crates/zed/src/zed/open_listener.rs b/crates/zed/src/zed/open_listener.rs
+index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3a407c9d1 100644
+--- a/crates/zed/src/zed/open_listener.rs
++++ b/crates/zed/src/zed/open_listener.rs
+@@ -60,7 +60,7 @@ pub enum OpenRequestKind {
+         external_source_prompt: Option<ExternalSourcePrompt>,
+     },
+     InstallSkill {
+-        /// Full `SKILL.md` contents embedded in a `zed://skill` share link.
++        /// Full `SKILL.md` contents embedded in a `zedha://skill` share link.
+         content: String,
+     },
+     DockMenuAction {
+@@ -162,34 +162,34 @@ impl OpenRequest {
+                 });
+             } else if let Some(file) = url.strip_prefix("file://") {
+                 this.parse_file_path(file)
+-            } else if let Some(file) = url.strip_prefix("zed://file") {
++            } else if let Some(file) = url.strip_prefix("zedha://file") {
+                 this.parse_file_path(file)
+-            } else if let Some(file) = url.strip_prefix("zed://ssh") {
++            } else if let Some(file) = url.strip_prefix("zedha://ssh") {
+                 let ssh_url = "ssh:/".to_string() + file;
+                 this.parse_ssh_file_path(&ssh_url, cx)?
+-            } else if let Some(extension_id) = url.strip_prefix("zed://extension/") {
++            } else if let Some(extension_id) = url.strip_prefix("zedha://extension/") {
+                 this.kind = Some(OpenRequestKind::Extension {
+                     extension_id: extension_id.to_string(),
+                 });
+             } else if url.starts_with(agent_skills::SKILL_SHARE_LINK_PREFIX) {
+                 this.parse_skill_install_url(&url)?
+-            } else if let Some(agent_path) = url.strip_prefix("zed://agent") {
++            } else if let Some(agent_path) = url.strip_prefix("zedha://agent") {
+                 this.parse_agent_url(agent_path)
+-            } else if url == "zed://" || url == "zed://open" || url == "zed://open/" {
++            } else if url == "zedha://" || url == "zedha://open" || url == "zedha://open/" {
+                 this.kind = Some(OpenRequestKind::FocusApp);
+-            } else if let Some(schema_path) = url.strip_prefix("zed://schemas/") {
++            } else if let Some(schema_path) = url.strip_prefix("zedha://schemas/") {
+                 this.kind = Some(OpenRequestKind::BuiltinJsonSchema {
+                     schema_path: schema_path.to_string(),
+                 });
+-            } else if url == "zed://settings" || url == "zed://settings/" {
++            } else if url == "zedha://settings" || url == "zedha://settings/" {
+                 this.kind = Some(OpenRequestKind::Setting { setting_path: None });
+-            } else if let Some(setting_path) = url.strip_prefix("zed://settings/") {
++            } else if let Some(setting_path) = url.strip_prefix("zedha://settings/") {
+                 this.kind = Some(OpenRequestKind::Setting {
+                     setting_path: Some(setting_path.to_string()),
+                 });
+-            } else if let Some(clone_path) = url.strip_prefix("zed://git/clone") {
++            } else if let Some(clone_path) = url.strip_prefix("zedha://git/clone") {
+                 this.parse_git_clone_url(clone_path)?
+-            } else if let Some(commit_path) = url.strip_prefix("zed://git/commit/") {
++            } else if let Some(commit_path) = url.strip_prefix("zedha://git/commit/") {
+                 this.parse_git_commit_url(commit_path)?
+             } else if url.starts_with("ssh://") {
+                 this.parse_ssh_file_path(&url, cx)?
+@@ -233,7 +233,7 @@ impl OpenRequest {
+     }
+ 
+     fn parse_skill_install_url(&mut self, url: &str) -> Result<()> {
+-        // Format: zed://skill?data=<base64url of SKILL.md contents>
++        // Format: zedha://skill?data=<base64url of SKILL.md contents>
+         let content = agent_skills::decode_skill_share_link(url)?;
+         self.kind = Some(OpenRequestKind::InstallSkill { content });
+         Ok(())
+@@ -1415,7 +1415,7 @@ mod tests {
+         let request = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://agent".into()],
++                    urls: vec!["zedha://agent".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -1469,7 +1469,7 @@ mod tests {
+         let result = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://skill?data=!!!notbase64".into()],
++                    urls: vec!["zedha://skill?data=!!!notbase64".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -1480,7 +1480,7 @@ mod tests {
+     }
+ 
+     fn agent_url_with_prompt(prompt: &str) -> String {
+-        let mut serializer = url::form_urlencoded::Serializer::new("zed://agent?".to_string());
++        let mut serializer = url::form_urlencoded::Serializer::new("zedha://agent?".to_string());
+         serializer.append_pair("prompt", prompt);
+         serializer.finish()
+     }
+@@ -1523,7 +1523,7 @@ mod tests {
+         let request = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://agent/?prompt=hello".into()],
++                    urls: vec!["zedha://agent/?prompt=hello".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -1550,7 +1550,7 @@ mod tests {
+     fn test_parse_focus_app_url(cx: &mut TestAppContext) {
+         let _app_state = init_test(cx);
+ 
+-        for url in ["zed://", "zed://open", "zed://open/"] {
++        for url in ["zedha://", "zedha://open", "zedha://open/"] {
+             let request = cx.update(|cx| {
+                 OpenRequest::parse(
+                     RawOpenRequest {
+@@ -1606,7 +1606,7 @@ mod tests {
+         let request = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://git/commit/abc123?repo=path/to/repo".into()],
++                    urls: vec!["zedha://git/commit/abc123?repo=path/to/repo".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -1627,7 +1627,7 @@ mod tests {
+         let request = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://git/commit/def456?repo=path%20with%20spaces".into()],
++                    urls: vec!["zedha://git/commit/def456?repo=path%20with%20spaces".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -1648,7 +1648,7 @@ mod tests {
+             assert!(
+                 OpenRequest::parse(
+                     RawOpenRequest {
+-                        urls: vec!["zed://git/commit/abc123?repo=".into()],
++                        urls: vec!["zedha://git/commit/abc123?repo=".into()],
+                         ..Default::default()
+                     },
+                     cx,
+@@ -1663,7 +1663,7 @@ mod tests {
+         let result = cx.update(|cx| {
+             OpenRequest::parse(
+                 RawOpenRequest {
+-                    urls: vec!["zed://git/commit/abc123?foo=bar".into()],
++                    urls: vec!["zedha://git/commit/abc123?foo=bar".into()],
+                     ..Default::default()
+                 },
+                 cx,
+@@ -2025,7 +2025,7 @@ mod tests {
+             OpenRequest::parse(
+                 RawOpenRequest {
+                     urls: vec![
+-                        "zed://git/clone/?repo=https://github.com/zed-industries/zed.git".into(),
++                        "zedha://git/clone/?repo=https://github.com/zed-industries/zed.git".into(),
+                     ],
+                     ..Default::default()
+                 },
+@@ -2050,7 +2050,7 @@ mod tests {
+             OpenRequest::parse(
+                 RawOpenRequest {
+                     urls: vec![
+-                        "zed://git/clone?repo=https://github.com/zed-industries/zed.git".into(),
++                        "zedha://git/clone?repo=https://github.com/zed-industries/zed.git".into(),
+                     ],
+                     ..Default::default()
+                 },
+@@ -2075,7 +2075,7 @@ mod tests {
+             OpenRequest::parse(
+                 RawOpenRequest {
+                     urls: vec![
+-                        "zed://git/clone/?repo=https%3A%2F%2Fgithub.com%2Fzed-industries%2Fzed.git"
++                        "zedha://git/clone/?repo=https%3A%2F%2Fgithub.com%2Fzed-industries%2Fzed.git"
+                             .into(),
+                     ],
+                     ..Default::default()
+diff --git a/crates/zed/src/zed/open_url_modal.rs b/crates/zed/src/zed/open_url_modal.rs
+index d143dc0ba0919ac444e84b56d96271dde4df6587..59d8e0b18e41168591d31a7239d7a259f1f1e1d0 100644
+--- a/crates/zed/src/zed/open_url_modal.rs
++++ b/crates/zed/src/zed/open_url_modal.rs
+@@ -27,7 +27,7 @@ impl OpenUrlModal {
+     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+         let editor = cx.new(|cx| {
+             let mut editor = Editor::single_line(window, cx);
+-            editor.set_placeholder_text("zed://...", window, cx);
++            editor.set_placeholder_text("zedha://...", window, cx);
+             editor
+         });
+ 
+@@ -53,8 +53,8 @@ impl OpenUrlModal {
+             return;
+         }
+ 
+-        // Handle zed:// URLs internally.
+-        if url.starts_with("zed://") || url.starts_with("zed-cli://") {
++        // Handle zedha:// URLs internally.
++        if url.starts_with("zedha://") || url.starts_with("zed-cli://") {
+             OpenListener::global(cx).open(RawOpenRequest {
+                 urls: vec![url],
+                 ..Default::default()
+diff --git a/crates/zed/src/zed/windows_only_instance.rs b/crates/zed/src/zed/windows_only_instance.rs
+index c43e4f9e198eac10a281a1f904efddcdaefac1b3..bed6fa655de2b771e71e8919aef30f2e242cb445 100644
+--- a/crates/zed/src/zed/windows_only_instance.rs
++++ b/crates/zed/src/zed/windows_only_instance.rs
+@@ -126,7 +126,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
+             match std::fs::canonicalize(&path) {
+                 Ok(path) => paths.push(path.to_string_lossy().into_owned()),
+                 Err(error) => {
+-                    if path.starts_with("zed://")
++                    if path.starts_with("zedha://")
+                         || path.starts_with("http://")
+                         || path.starts_with("https://")
+                         || path.starts_with("file://")
+diff --git a/script/bundle-mac b/script/bundle-mac
+index eae4f861baeb043602eb4af26f7e285d79b9586f..0e3b056a767d1fcf1ef7df1125b825c8fa3680b8 100755
+--- a/script/bundle-mac
++++ b/script/bundle-mac
+@@ -203,7 +203,7 @@ function sign_app_binaries() {
+         # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
+         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
+         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
+-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zed" -v
++        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zedha" -v
+         /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
+     else
+         echo "One or more of the following variables are missing: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID, APPLE_NOTARIZATION_ISSUER_ID"
+@@ -245,7 +245,7 @@ function sign_app_binaries() {
+     else
+         dmg_target_directory="target/${target_triple}/${target_dir}"
+         dmg_source_directory="${dmg_target_directory}/dmg"
+-        dmg_file_path="${dmg_target_directory}/Zed-${arch_suffix}.dmg"
++        dmg_file_path="${dmg_target_directory}/Zedha-${arch_suffix}.dmg"
+         xcode_bin_dir_path="$(xcode-select -p)/usr/bin"
+ 
+         rm -rf ${dmg_source_directory}
+@@ -257,7 +257,7 @@ function sign_app_binaries() {
+         ln -s /Applications ${dmg_source_directory}
+ 
+         echo "Creating final DMG at ${dmg_file_path} using ${dmg_source_directory}"
+-        hdiutil create -volname Zed -srcfolder "${dmg_source_directory}" -ov -format UDZO "${dmg_file_path}"
++        hdiutil create -volname Zedha -srcfolder "${dmg_source_directory}" -ov -format UDZO "${dmg_file_path}"
+ 
+         # If someone runs this bundle script locally, a symlink will be placed in `dmg_source_directory`.
+         # This symlink causes CPU issues with Zed if the Zed codebase is the project being worked on, so we simply remove it for now.
+@@ -297,8 +297,8 @@ function upload_debug_symbols() {
+         echo "local install; skipping sentry upload."
+     elif [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
+         echo "Uploading zed debug symbols to sentry..."
+-        exe_path="target/${target_triple}/release/Zed"
+-        if ! dsymutil --flat "target/${target_triple}/${target_dir}/zed" 2> target/dsymutil.log; then
++        exe_path="target/${target_triple}/release/zedha"
++        if ! dsymutil --flat "target/${target_triple}/${target_dir}/zedha" 2> target/dsymutil.log; then
+             echo "dsymutil failed"
+             cat target/dsymutil.log
+             exit 1
+@@ -314,7 +314,7 @@ function upload_debug_symbols() {
+         for attempt in 1 2 3; do
+             echo "Sentry upload attempt $attempt..."
+             if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
+-                "target/${target_triple}/${target_dir}/zed.dwarf" \
++                "target/${target_triple}/${target_dir}/zedha.dwarf" \
+                 "target/${target_triple}/${target_dir}/remote_server.dwarf"; then
+                 break
+             else
+@@ -332,7 +332,7 @@ function upload_debug_symbols() {
+ 
+ upload_debug_symbols
+ 
+-cp target/${target_triple}/${target_dir}/zed "${app_path}/Contents/MacOS/zed"
++cp target/${target_triple}/${target_dir}/zedha "${app_path}/Contents/MacOS/zedha"
+ cp target/${target_triple}/${target_dir}/cli "${app_path}/Contents/MacOS/cli"
+ sign_app_binaries
+ 
