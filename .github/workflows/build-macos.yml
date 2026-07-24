@@ -41,7 +41,19 @@ jobs:
       - name: Run targeted Zedha tests
         if: ${{ inputs.run_tests }}
         run: ./scripts/test
+      - name: Setup R2 sccache
+        working-directory: .work/zed
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          SCCACHE_BUCKET: sccache-zed-naresh
+          SCCACHE_KEY_PREFIX: zedha-ci/
+        run: script/setup-sccache
       - name: Build Zedha DMG
+        env:
+          # setup-sccache writes these to GITHUB_ENV; keep RUSTC_WRAPPER active for the bundle.
+          CARGO_INCREMENTAL: "0"
         run: ./scripts/build-macos-artifact .work/zed '${{ inputs.target }}'
       - name: Upload Zedha DMG
         uses: actions/upload-artifact@v4
