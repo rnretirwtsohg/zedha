@@ -154,6 +154,7 @@ url.strip_prefix("zedha://agent")
 url == "zedha://open"
 EOF
   {
+    printf 'cargo bundle --release --target "$target_triple" --select-workspace-root --bin zedha\n'
     printf 'cp target/${target_triple}/${target_dir}/%s "${app_path}/Contents/MacOS/%s"\n' \
       "$bundle_binary" "$bundle_binary"
     printf 'dmg_file_path="${dmg_target_directory}/Zedha-${arch_suffix}.dmg"\n'
@@ -215,6 +216,20 @@ test_check_identity_rejects_mismatched_url_handler() {
   assert_file_contains "$output" 'expected crates/zed/src/zed/open_listener.rs to contain: zedha://file'
 }
 
+test_check_identity_rejects_implicit_bundle_binary() {
+  local source="$test_root/source-with-implicit-bundle-binary"
+  local output="$test_root/check-bundle-selection-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's/ --bin zedha//' "$source/script/bundle-mac"
+
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject an implicit cargo-bundle binary" >&2
+    exit 1
+  fi
+
+  assert_file_contains "$output" 'expected script/bundle-mac to contain: --bin zedha'
+}
+
 test_check_identity_accepts_consistent_identity() {
   local source="$test_root/source-with-consistent-identity"
   create_identity_fixture "$source" zedha
@@ -244,6 +259,7 @@ test_check_identity_rejects_mismatched_binary_name
 test_check_identity_rejects_mismatched_bundle_binary
 test_check_identity_rejects_mismatched_cli_bundle_binary
 test_check_identity_rejects_mismatched_url_handler
+test_check_identity_rejects_implicit_bundle_binary
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
 

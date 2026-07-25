@@ -704,6 +704,15 @@ diff --git a/script/bundle-mac b/script/bundle-mac
 index eae4f861baeb043602eb4af26f7e285d79b9586f..0e3b056a767d1fcf1ef7df1125b825c8fa3680b8 100755
 --- a/script/bundle-mac
 +++ b/script/bundle-mac
+@@ -100,7 +100,7 @@ sed \
+     "s/package.metadata.bundle-${channel}/package.metadata.bundle/" \
+     Cargo.toml
+ 
+-app_path=$(cargo bundle ${build_flag} --target $target_triple --select-workspace-root | xargs)
++app_path=$(cargo bundle ${build_flag} --target $target_triple --select-workspace-root --bin zedha | xargs)
+ 
+ mv Cargo.toml.backup Cargo.toml
+ popd
 @@ -203,7 +203,7 @@ function sign_app_binaries() {
          # sequence of codesign commands modeled after this example: https://developer.apple.com/forums/thread/701514
          /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v

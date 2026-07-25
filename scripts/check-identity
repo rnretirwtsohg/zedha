@@ -12,7 +12,7 @@ fi
 assert_contains() {
   local file=$1
   local expected=$2
-  if ! grep -Fq "$expected" "$source_dir/$file"; then
+  if ! grep -Fq -- "$expected" "$source_dir/$file"; then
     echo "expected $file to contain: $expected" >&2
     exit 1
   fi
@@ -21,7 +21,7 @@ assert_contains() {
 assert_not_contains() {
   local file=$1
   local unexpected=$2
-  if grep -Fq "$unexpected" "$source_dir/$file"; then
+  if grep -Fq -- "$unexpected" "$source_dir/$file"; then
     echo "expected $file not to contain: $unexpected" >&2
     exit 1
   fi
@@ -40,6 +40,7 @@ assert_contains crates/zed/Cargo.toml 'name = "Zedha"'
 assert_contains crates/zed/Cargo.toml 'osx_url_schemes = ["zedha"]'
 assert_contains script/bundle-mac 'Contents/MacOS/zedha'
 assert_contains script/bundle-mac 'target/${target_triple}/${target_dir}/zedha'
+assert_contains script/bundle-mac '--bin zedha'
 assert_contains script/bundle-mac 'Zedha-${arch_suffix}.dmg'
 assert_contains script/bundle-mac 'hdiutil create -volname Zedha'
 assert_contains crates/client/src/client.rs 'pub const ZED_URL_SCHEME: &str = "zedha";'
