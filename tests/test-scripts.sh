@@ -133,7 +133,7 @@ default-run = "$binary_name"
 [[bin]]
 name = "$binary_name"
 
-[package.metadata.bundle-stable]
+[package.metadata.bundle-stable.bin.zedha]
 identifier = "me.ghostwriternr.Zedha"
 name = "Zedha"
 osx_url_schemes = ["zedha"]
@@ -230,6 +230,20 @@ test_check_identity_rejects_implicit_bundle_binary() {
   assert_file_contains "$output" 'expected script/bundle-mac to contain: --bin zedha'
 }
 
+test_check_identity_rejects_root_bundle_metadata() {
+  local source="$test_root/source-with-root-bundle-metadata"
+  local output="$test_root/check-bundle-metadata-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's/\.bundle-stable\.bin\.zedha/\.bundle-stable/' "$source/crates/zed/Cargo.toml"
+
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject root metadata for an explicitly selected binary" >&2
+    exit 1
+  fi
+
+  assert_file_contains "$output" 'expected crates/zed/Cargo.toml to contain: [package.metadata.bundle-stable.bin.zedha]'
+}
+
 test_check_identity_accepts_consistent_identity() {
   local source="$test_root/source-with-consistent-identity"
   create_identity_fixture "$source" zedha
@@ -260,6 +274,7 @@ test_check_identity_rejects_mismatched_bundle_binary
 test_check_identity_rejects_mismatched_cli_bundle_binary
 test_check_identity_rejects_mismatched_url_handler
 test_check_identity_rejects_implicit_bundle_binary
+test_check_identity_rejects_root_bundle_metadata
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
 

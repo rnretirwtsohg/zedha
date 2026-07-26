@@ -360,7 +360,8 @@ index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1db
  [[bin]]
 @@ -301,11 +301,11 @@ osx_url_schemes = ["zed"]
  
- [package.metadata.bundle-stable]
+-[package.metadata.bundle-stable]
++[package.metadata.bundle-stable.bin.zedha]
  icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
 -identifier = "dev.zed.Zed"
 -name = "Zed"

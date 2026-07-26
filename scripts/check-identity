@@ -35,6 +35,7 @@ assert_contains crates/release_channel/src/lib.rs 'ReleaseChannel::Stable => "ze
 assert_contains crates/release_channel/src/lib.rs 'ReleaseChannel::Stable => "me.ghostwriternr.Zedha"'
 assert_contains crates/zed/Cargo.toml 'default-run = "zedha"'
 assert_contains crates/zed/Cargo.toml 'name = "zedha"'
+assert_contains crates/zed/Cargo.toml '[package.metadata.bundle-stable.bin.zedha]'
 assert_contains crates/zed/Cargo.toml 'identifier = "me.ghostwriternr.Zedha"'
 assert_contains crates/zed/Cargo.toml 'name = "Zedha"'
 assert_contains crates/zed/Cargo.toml 'osx_url_schemes = ["zedha"]'
