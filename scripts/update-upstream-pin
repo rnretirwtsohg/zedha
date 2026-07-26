@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+upstream_repo=${ZEDHA_UPSTREAM_REPO:-https://github.com/zed-industries/zed.git}
+pin_file=${ZEDHA_UPSTREAM_PIN:-"$repo_root/upstream/stable.json"}
+
+python3 - "$pin_file" "$upstream_repo" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+pin_path = Path(sys.argv[1])
+upstream_repo = sys.argv[2]
+tag_pattern = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+commit_pattern = re.compile(r"[0-9a-f]{40}")
+
+
+def fail(message):
+    raise SystemExit(message)
+
+
+try:
+    with pin_path.open("r", encoding="utf-8") as file:
+        pin = json.load(file)
+except (OSError, json.JSONDecodeError) as error:
+    fail(f"invalid upstream pin {pin_path}: {error}")
+
+if not isinstance(pin, dict):
+    fail(f"invalid upstream pin {pin_path}: expected a JSON object")
+
+current_tag = pin.get("tag")
+current_commit = pin.get("commit")
+if not isinstance(current_tag, str) or not tag_pattern.fullmatch(current_tag):
+    fail(f"invalid upstream pin {pin_path}: tag must match vMAJOR.MINOR.PATCH")
+if not isinstance(current_commit, str) or not commit_pattern.fullmatch(current_commit):
+    fail(f"invalid upstream pin {pin_path}: commit must be a 40-character lowercase SHA-1")
+
+result = subprocess.run(
+    ["git", "ls-remote", "--tags", upstream_repo, "refs/tags/v*"],
+    check=True,
+    text=True,
+    stdout=subprocess.PIPE,
+)
+
+releases = {}
+for line in result.stdout.splitlines():
+    object_id, ref = line.split("\t", 1)
+    peeled = ref.endswith("^{}")
+    unpeeled_ref = ref[:-3] if peeled else ref
+    prefix = "refs/tags/"
+    if not unpeeled_ref.startswith(prefix):
+        continue
+    tag = unpeeled_ref[len(prefix):]
+    match = tag_pattern.fullmatch(tag)
+    if match is None:
+        continue
+    version = tuple(int(part) for part in match.groups())
+    release = releases.setdefault(version, {"tag": tag})
+    release["peeled" if peeled else "direct"] = object_id
+
+if not releases:
+    fail(f"no stable vMAJOR.MINOR.PATCH tags found in {upstream_repo}")
+
+latest_version = max(releases)
+latest = releases[latest_version]
+latest_tag = latest["tag"]
+latest_commit = latest.get("peeled", latest.get("direct"))
+if latest_commit is None or not commit_pattern.fullmatch(latest_commit):
+    fail(f"could not resolve {latest_tag} to a commit")
+
+current_match = tag_pattern.fullmatch(current_tag)
+current_version = tuple(int(part) for part in current_match.groups())
+
+if current_version > latest_version:
+    print(
+        f"Pinned {current_tag} is newer than latest visible {latest_tag}; "
+        "refusing to downgrade"
+    )
+    raise SystemExit(0)
+
+if current_version == latest_version:
+    if current_commit != latest_commit:
+        fail(
+            f"upstream tag {latest_tag} resolves to {latest_commit}, "
+            f"but the pin records {current_commit}"
+        )
+    print(f"Zedha is already pinned to latest stable {current_tag} ({current_commit})")
+    raise SystemExit(0)
+
+updated_pin = {"tag": latest_tag, "commit": latest_commit}
+temporary_path = None
+try:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=pin_path.parent,
+        prefix=f".{pin_path.name}.",
+        delete=False,
+    ) as file:
+        temporary_path = Path(file.name)
+        json.dump(updated_pin, file, indent=2)
+        file.write("\n")
+    os.replace(temporary_path, pin_path)
+finally:
+    if temporary_path is not None and temporary_path.exists():
+        temporary_path.unlink()
+
+print(
+    f"Updated upstream pin from {current_tag} ({current_commit}) "
+    f"to {latest_tag} ({latest_commit})"
+)
+PY

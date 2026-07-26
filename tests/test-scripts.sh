@@ -29,6 +29,51 @@ create_upstream_repo() {
   git -C "$upstream" tag v1.2.3
 }
 
+add_upstream_release() {
+  local upstream=$1
+  local tag=$2
+  local tag_kind=${3:-lightweight}
+
+  printf '%s\n' "$tag" >> "$upstream/fixture.txt"
+  git -C "$upstream" add fixture.txt
+  git -C "$upstream" commit --quiet -m "Release $tag"
+
+  if [[ "$tag_kind" == "annotated" ]]; then
+    git -C "$upstream" tag -a "$tag" -m "$tag"
+  else
+    git -C "$upstream" tag "$tag"
+  fi
+}
+
+write_upstream_pin() {
+  local path=$1
+  local tag=$2
+  local commit=$3
+  cat > "$path" <<JSON
+{
+  "tag": "$tag",
+  "commit": "$commit"
+}
+JSON
+}
+
+assert_pin_equals() {
+  local path=$1
+  local expected_tag=$2
+  local expected_commit=$3
+  python3 - "$path" "$expected_tag" "$expected_commit" <<'PY'
+import json
+import sys
+
+path, expected_tag, expected_commit = sys.argv[1:]
+with open(path, "r", encoding="utf-8") as file:
+    pin = json.load(file)
+expected = {"tag": expected_tag, "commit": expected_commit}
+if pin != expected:
+    raise SystemExit(f"expected {expected!r}, got {pin!r}")
+PY
+}
+
 test_fetch_upstream_checks_out_pinned_commit() {
   local upstream="$test_root/upstream"
   local checkout="$test_root/checkout"
@@ -266,6 +311,139 @@ SCRIPT
   assert_file_contains "$artifacts/Zedha-aarch64.dmg" "fake dmg"
 }
 
+test_update_upstream_pin_selects_newer_stable() {
+  local upstream="$test_root/upstream-for-update"
+  create_upstream_repo "$upstream"
+  local old_commit
+  old_commit=$(git -C "$upstream" rev-parse v1.2.3^{commit})
+
+  add_upstream_release "$upstream" v1.3.0
+  local new_commit
+  new_commit=$(git -C "$upstream" rev-parse v1.3.0^{commit})
+
+  local pin="$test_root/update-stable.json"
+  write_upstream_pin "$pin" v1.2.3 "$old_commit"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  assert_pin_equals "$pin" v1.3.0 "$new_commit"
+}
+
+test_update_upstream_pin_is_noop_when_current() {
+  local upstream="$test_root/upstream-current"
+  create_upstream_repo "$upstream"
+  local commit
+  commit=$(git -C "$upstream" rev-parse v1.2.3^{commit})
+
+  local pin="$test_root/current-stable.json"
+  local before="$test_root/current-stable.before.json"
+  write_upstream_pin "$pin" v1.2.3 "$commit"
+  cp "$pin" "$before"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  cmp "$before" "$pin"
+}
+
+test_update_upstream_pin_ignores_nonstable_tags() {
+  local upstream="$test_root/upstream-nonstable"
+  create_upstream_repo "$upstream"
+  local stable_commit
+  stable_commit=$(git -C "$upstream" rev-parse v1.2.3^{commit})
+
+  add_upstream_release "$upstream" v1.3.0-pre
+  add_upstream_release "$upstream" nightly
+  add_upstream_release "$upstream" v2.0
+
+  local pin="$test_root/nonstable.json"
+  write_upstream_pin "$pin" v1.2.3 "$stable_commit"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  assert_pin_equals "$pin" v1.2.3 "$stable_commit"
+}
+
+test_update_upstream_pin_uses_semantic_ordering() {
+  local upstream="$test_root/upstream-semver"
+  create_upstream_repo "$upstream"
+  git -C "$upstream" tag -d v1.2.3 >/dev/null
+  git -C "$upstream" tag v1.9.9
+  local old_commit
+  old_commit=$(git -C "$upstream" rev-parse v1.9.9^{commit})
+
+  add_upstream_release "$upstream" v1.10.0
+  local new_commit
+  new_commit=$(git -C "$upstream" rev-parse v1.10.0^{commit})
+
+  local pin="$test_root/semver.json"
+  write_upstream_pin "$pin" v1.9.9 "$old_commit"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  assert_pin_equals "$pin" v1.10.0 "$new_commit"
+}
+
+test_update_upstream_pin_peels_annotated_tags() {
+  local upstream="$test_root/upstream-annotated"
+  create_upstream_repo "$upstream"
+  local old_commit
+  old_commit=$(git -C "$upstream" rev-parse v1.2.3^{commit})
+
+  add_upstream_release "$upstream" v1.3.0 annotated
+  local release_commit
+  local tag_object
+  release_commit=$(git -C "$upstream" rev-parse v1.3.0^{commit})
+  tag_object=$(git -C "$upstream" rev-parse v1.3.0)
+
+  if [[ "$release_commit" == "$tag_object" ]]; then
+    echo "expected annotated tag object to differ from its commit" >&2
+    exit 1
+  fi
+
+  local pin="$test_root/annotated.json"
+  write_upstream_pin "$pin" v1.2.3 "$old_commit"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  assert_pin_equals "$pin" v1.3.0 "$release_commit"
+}
+
+test_update_upstream_pin_rejects_invalid_pin() {
+  local upstream="$test_root/upstream-invalid-pin"
+  create_upstream_repo "$upstream"
+  local pin="$test_root/invalid-pin.json"
+  local output="$test_root/invalid-pin-output"
+  printf '{"tag": 123}\n' > "$pin"
+
+  if ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin" >"$output" 2>&1; then
+    echo "expected malformed upstream pin to fail" >&2
+    exit 1
+  fi
+
+  assert_file_contains "$output" "invalid upstream pin"
+}
+
+test_update_upstream_pin_refuses_downgrade() {
+  local upstream="$test_root/upstream-no-downgrade"
+  create_upstream_repo "$upstream"
+  local commit
+  commit=$(git -C "$upstream" rev-parse v1.2.3^{commit})
+
+  local pin="$test_root/no-downgrade.json"
+  write_upstream_pin "$pin" v2.0.0 "$commit"
+
+  ZEDHA_UPSTREAM_REPO="$upstream" ZEDHA_UPSTREAM_PIN="$pin" \
+    "$repo_root/scripts/update-upstream-pin"
+
+  assert_pin_equals "$pin" v2.0.0 "$commit"
+}
+
 test_fetch_upstream_checks_out_pinned_commit
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir
@@ -277,5 +455,12 @@ test_check_identity_rejects_implicit_bundle_binary
 test_check_identity_rejects_root_bundle_metadata
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
+test_update_upstream_pin_selects_newer_stable
+test_update_upstream_pin_is_noop_when_current
+test_update_upstream_pin_ignores_nonstable_tags
+test_update_upstream_pin_uses_semantic_ordering
+test_update_upstream_pin_peels_annotated_tags
+test_update_upstream_pin_rejects_invalid_pin
+test_update_upstream_pin_refuses_downgrade
 
 echo "All script tests passed"
