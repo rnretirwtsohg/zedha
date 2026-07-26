@@ -1,3 +1,5 @@
 .work/
 artifacts/
 .DS_Store
+
+.worktrees/
