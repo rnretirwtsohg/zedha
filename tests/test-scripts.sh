@@ -444,6 +444,20 @@ test_update_upstream_pin_refuses_downgrade() {
   assert_pin_equals "$pin" v2.0.0 "$commit"
 }
 
+test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
+  local workflow="$repo_root/.github/workflows/upgrade-upstream.yml"
+
+  assert_file_contains "$workflow" "schedule:"
+  assert_file_contains "$workflow" "workflow_dispatch:"
+  assert_file_contains "$workflow" 'token: ${{ secrets.UPGRADE_PR_TOKEN }}'
+  assert_file_contains "$workflow" "./scripts/update-upstream-pin"
+  assert_file_contains "$workflow" "./scripts/fetch-upstream"
+  assert_file_contains "$workflow" "./scripts/apply-patches"
+  assert_file_contains "$workflow" "./scripts/check-identity"
+  assert_file_contains "$workflow" "gh pr list"
+  assert_file_contains "$workflow" "gh pr create"
+}
+
 test_fetch_upstream_checks_out_pinned_commit
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir
@@ -462,5 +476,6 @@ test_update_upstream_pin_uses_semantic_ordering
 test_update_upstream_pin_peels_annotated_tags
 test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
+test_upgrade_workflow_wires_detection_validation_and_pr_creation
 
 echo "All script tests passed"

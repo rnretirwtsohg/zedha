@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check shell syntax
-        run: bash -n scripts/fetch-upstream scripts/apply-patches scripts/build-macos-artifact scripts/check-identity scripts/test tests/test-scripts.sh
+        run: bash -n scripts/fetch-upstream scripts/apply-patches scripts/build-macos-artifact scripts/check-identity scripts/test scripts/update-upstream-pin tests/test-scripts.sh
       - name: Run script tests
         run: ./tests/test-scripts.sh
 

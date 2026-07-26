@@ -1,0 +1,124 @@
+name: Upgrade Upstream Zed
+
+on:
+  schedule:
+    - cron: "17 14 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: upgrade-upstream-zed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    name: Detect and propose stable upgrade
+    if: github.repository == 'rnretirwtsohg/zedha'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.UPGRADE_PR_TOKEN }}
+          persist-credentials: false
+
+      - name: Detect latest stable Zed
+        id: candidate
+        run: |
+          old_tag=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["tag"])')
+          old_commit=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["commit"])')
+
+          ./scripts/update-upstream-pin
+
+          if git diff --quiet -- upstream/stable.json; then
+            echo "upgrade=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          new_tag=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["tag"])')
+          new_commit=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["commit"])')
+          branch="automation/upgrade-zed-${new_tag}"
+
+          echo "upgrade=true" >> "$GITHUB_OUTPUT"
+          echo "old_tag=$old_tag" >> "$GITHUB_OUTPUT"
+          echo "old_commit=$old_commit" >> "$GITHUB_OUTPUT"
+          echo "new_tag=$new_tag" >> "$GITHUB_OUTPUT"
+          echo "new_commit=$new_commit" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Check for an existing upgrade pull request
+        id: duplicate
+        if: steps.candidate.outputs.upgrade == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+        run: |
+          count=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --head "$BRANCH" \
+            --json number \
+            --jq 'length')
+          if [[ "$count" -gt 0 ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "An open pull request already exists for $BRANCH"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch candidate Zed
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        run: ./scripts/fetch-upstream
+
+      - name: Apply Zedha patches
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        run: ./scripts/apply-patches
+
+      - name: Check Zedha identity
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        run: ./scripts/check-identity
+
+      - name: Push upgrade branch
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+          NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
+        run: |
+          git config user.name "Zedha Upgrade Bot"
+          git config user.email "zedha-upgrade-bot@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add upstream/stable.json
+          git commit -m "Upgrade Zedha to Zed $NEW_TAG"
+          gh auth setup-git
+          git push --set-upstream origin "$BRANCH"
+
+      - name: Open upgrade pull request
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+          OLD_TAG: ${{ steps.candidate.outputs.old_tag }}
+          OLD_COMMIT: ${{ steps.candidate.outputs.old_commit }}
+          NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
+          NEW_COMMIT: ${{ steps.candidate.outputs.new_commit }}
+        run: |
+          cat > "$RUNNER_TEMP/upgrade-pr-body.md" <<EOF
+          Upgrade the pinned upstream Zed stable release from $OLD_TAG to
+          $NEW_TAG.
+
+          Previous commit: $OLD_COMMIT
+          New commit: $NEW_COMMIT
+
+          The existing downstream patches apply cleanly and the Zedha identity
+          checks pass. This pull request requires manual review and merge.
+          EOF
+
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$BRANCH" \
+            --title "Upgrade Zedha to Zed $NEW_TAG" \
+            --body-file "$RUNNER_TEMP/upgrade-pr-body.md"
