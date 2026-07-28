@@ -47,5 +47,12 @@ jobs:
         run: ./scripts/apply-patches
       - name: Check Zedha identity
         run: ./scripts/check-identity
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .work/zed -> target
+          shared-key: zedha-macos-targeted-tests
+          cache-targets: true
+          cache-on-failure: true
       - name: Run targeted Zedha tests
         run: ./scripts/test
