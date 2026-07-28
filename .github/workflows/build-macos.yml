@@ -27,7 +27,8 @@ permissions:
 jobs:
   build:
     name: Build Zedha DMG
-    runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'macos-15' }}
+    # Blacksmith macOS is Apple Silicon only. Keep GitHub-hosted Intel for x86_64.
+    runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'blacksmith-12vcpu-macos-15' }}
     steps:
       - uses: actions/checkout@v4
       - name: Show disk space
@@ -38,6 +39,14 @@ jobs:
         run: ./scripts/apply-patches
       - name: Check Zedha identity
         run: ./scripts/check-identity
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .work/zed -> target
+          shared-key: zedha-macos-${{ inputs.target }}
+          # Compile outputs are handled by sccache; only reuse downloaded crates here.
+          cache-targets: false
+          cache-on-failure: true
       - name: Run targeted Zedha tests
         if: ${{ inputs.run_tests }}
         run: ./scripts/test
@@ -55,6 +64,9 @@ jobs:
           # setup-sccache writes these to GITHUB_ENV; keep RUSTC_WRAPPER active for the bundle.
           CARGO_INCREMENTAL: "0"
         run: ./scripts/build-macos-artifact .work/zed '${{ inputs.target }}'
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
       - name: Upload Zedha DMG
         uses: actions/upload-artifact@v4
         with:
