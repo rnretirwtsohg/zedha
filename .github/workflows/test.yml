@@ -14,7 +14,7 @@ permissions:
 jobs:
   scripts:
     name: Script tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
       - name: Check shell syntax
@@ -24,7 +24,7 @@ jobs:
 
   patch-apply:
     name: Apply patches
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: scripts
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
 
   targeted-tests:
     name: Targeted Zedha tests
-    runs-on: macos-15
+    runs-on: blacksmith-6vcpu-macos-15
     needs: patch-apply
     steps:
       - uses: actions/checkout@v4
