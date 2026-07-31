@@ -158,6 +158,7 @@ create_identity_fixture() {
     "$source/crates/client/src" \
     "$source/crates/cli/src" \
     "$source/crates/install_cli/src" \
+    "$source/crates/zed/resources" \
     "$source/crates/zed/src/zed" \
     "$source/script"
 
@@ -189,6 +190,7 @@ EOF
   cat > "$source/crates/cli/src/main.rs" <<'EOF'
 name = "zedha"
 app_bundle.join("Contents/MacOS/zedha")
+"../libexec/zedha-editor"
 EOF
   cat > "$source/crates/install_cli/src/install_cli_binary.rs" <<'EOF'
 Path::new("/usr/local/bin/zedha")
@@ -205,6 +207,12 @@ EOF
     printf 'dmg_file_path="${dmg_target_directory}/Zedha-${arch_suffix}.dmg"\n'
     printf 'hdiutil create -volname Zedha\n'
   } > "$source/script/bundle-mac"
+  cat > "$source/crates/zed/resources/zed.desktop.in" <<'EOF'
+Exec=$APP_CLI $APP_ARGS
+Icon=$APP_ICON
+Keywords=zedha;
+MimeType=text/plain;x-scheme-handler/zedha;
+EOF
 }
 
 test_check_identity_rejects_mismatched_binary_name() {
@@ -287,6 +295,30 @@ test_check_identity_rejects_root_bundle_metadata() {
   fi
 
   assert_file_contains "$output" 'expected crates/zed/Cargo.toml to contain: [package.metadata.bundle-stable.bin.zedha]'
+}
+
+test_check_identity_rejects_linux_gui_name() {
+  local source="$test_root/source-with-linux-zed-name"
+  local output="$test_root/check-linux-gui-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's/zedha-editor/zed-editor/' "$source/crates/cli/src/main.rs"
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject the official Linux GUI name" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" 'expected crates/cli/src/main.rs to contain: ../libexec/zedha-editor'
+}
+
+test_check_identity_rejects_linux_url_scheme() {
+  local source="$test_root/source-with-linux-zed-scheme"
+  local output="$test_root/check-linux-scheme-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's|x-scheme-handler/zedha|x-scheme-handler/zed|' "$source/crates/zed/resources/zed.desktop.in"
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject the official Linux URL scheme" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" 'expected crates/zed/resources/zed.desktop.in to contain: x-scheme-handler/zedha;'
 }
 
 test_check_identity_accepts_consistent_identity() {
@@ -467,6 +499,8 @@ test_check_identity_rejects_mismatched_cli_bundle_binary
 test_check_identity_rejects_mismatched_url_handler
 test_check_identity_rejects_implicit_bundle_binary
 test_check_identity_rejects_root_bundle_metadata
+test_check_identity_rejects_linux_gui_name
+test_check_identity_rejects_linux_url_scheme
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
 test_update_upstream_pin_selects_newer_stable
