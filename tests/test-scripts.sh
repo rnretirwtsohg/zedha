@@ -57,6 +57,60 @@ write_upstream_pin() {
 JSON
 }
 
+write_nix_lock() {
+  local path=$1 commit=$2
+  cat > "$path" <<JSON
+{"nodes":{"root":{"inputs":{"zed":"zed"}},"zed":{"locked":{"rev":"$commit"}}},"root":"root","version":7}
+JSON
+}
+
+test_check_nix_pin_accepts_match() {
+  local commit=1111111111111111111111111111111111111111
+  local pin="$test_root/nix-match-pin.json" lock="$test_root/nix-match.lock"
+  write_upstream_pin "$pin" v1.2.3 "$commit"
+  write_nix_lock "$lock" "$commit"
+  assert_file_contains <("$repo_root/scripts/check-nix-pin" "$pin" "$lock") "Nix pin matches $commit"
+}
+
+test_check_nix_pin_rejects_mismatch() {
+  local pin="$test_root/nix-mismatch-pin.json" lock="$test_root/nix-mismatch.lock" output="$test_root/nix-mismatch.out"
+  write_upstream_pin "$pin" v1.2.3 1111111111111111111111111111111111111111
+  write_nix_lock "$lock" 2222222222222222222222222222222222222222
+  if "$repo_root/scripts/check-nix-pin" "$pin" "$lock" >"$output" 2>&1; then
+    echo "expected mismatched Nix pin to fail" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" "stable.json=1111111111111111111111111111111111111111"
+  assert_file_contains "$output" "flake.lock=2222222222222222222222222222222222222222"
+}
+
+test_sync_nix_pin_updates_only_zed() {
+  local commit=3333333333333333333333333333333333333333
+  local flake_dir="$test_root/sync-flake" pin="$test_root/sync-pin.json" fake_bin="$test_root/fake-nix-bin" args="$test_root/fake-nix.args"
+  mkdir -p "$flake_dir" "$fake_bin"
+  write_upstream_pin "$pin" v1.3.0 "$commit"
+  write_nix_lock "$flake_dir/flake.lock" 1111111111111111111111111111111111111111
+  cat > "$fake_bin/nix" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$ZEDHA_FAKE_NIX_ARGS"
+for argument in "$@"; do
+  case "$argument" in github:zed-industries/zed/*) commit=${argument##*/};; esac
+done
+python3 - "$ZEDHA_FAKE_LOCK" "$commit" <<'PY'
+import json, sys
+path, commit = sys.argv[1:]
+with open(path, encoding="utf-8") as file: lock = json.load(file)
+lock["nodes"]["zed"]["locked"]["rev"] = commit
+with open(path, "w", encoding="utf-8") as file: json.dump(lock, file)
+PY
+SH
+  chmod +x "$fake_bin/nix"
+  PATH="$fake_bin:$PATH" ZEDHA_FAKE_NIX_ARGS="$args" ZEDHA_FAKE_LOCK="$flake_dir/flake.lock" \
+    "$repo_root/scripts/sync-nix-pin" "$flake_dir" "$pin"
+  assert_file_contains "$args" "flake lock --override-input zed github:zed-industries/zed/$commit $flake_dir"
+  "$repo_root/scripts/check-nix-pin" "$pin" "$flake_dir/flake.lock"
+}
+
 assert_pin_equals() {
   local path=$1
   local expected_tag=$2
@@ -491,6 +545,9 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
 }
 
 test_fetch_upstream_checks_out_pinned_commit
+test_check_nix_pin_accepts_match
+test_check_nix_pin_rejects_mismatch
+test_sync_nix_pin_updates_only_zed
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir
 test_check_identity_rejects_mismatched_binary_name

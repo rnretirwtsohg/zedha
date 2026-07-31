@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+flake_dir=${1:-"$repo_root"}
+pin_file=${2:-"$repo_root/upstream/stable.json"}
+commit=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' "$pin_file")
+
+nix flake lock --override-input zed "github:zed-industries/zed/$commit" "$flake_dir"
+"$repo_root/scripts/check-nix-pin" "$pin_file" "$flake_dir/flake.lock"
