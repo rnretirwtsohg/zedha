@@ -556,6 +556,14 @@ test_linux_workflow_builds_and_caches_zedha() {
   assert_file_contains "$workflow" "nix flake check --no-build"
   assert_file_contains "$workflow" "nix build .#zedha"
   assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity"
+
+  local package_build_line flake_check_line
+  package_build_line=$(grep -nF "nix build .#zedha" "$workflow" | head -1 | cut -d: -f1)
+  flake_check_line=$(grep -nF "nix flake check --no-build" "$workflow" | head -1 | cut -d: -f1)
+  if [[ "$package_build_line" -ge "$flake_check_line" ]]; then
+    echo "expected the package build to realize Crane sources before flake check" >&2
+    exit 1
+  fi
 }
 
 test_readme_documents_native_nix_install() {
