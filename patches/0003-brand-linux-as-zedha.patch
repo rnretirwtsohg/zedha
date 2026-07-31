@@ -1,0 +1,27 @@
+diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+--- a/crates/cli/src/main.rs
++++ b/crates/cli/src/main.rs
+@@ -909,7 +909,7 @@ fn resolve_zed_path(cli: &Path, override_path: Option<&str>) -> Result<PathBuf> {
+                 // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
+                 // ./zed is for the target directory in development builds.
+                 let possible_locations =
+-                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
++                    ["../libexec/zedha-editor", "../lib/zedha/zedha-editor", "./zedha"];
+                 possible_locations
+                     .iter()
+                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
+diff --git a/crates/zed/resources/zed.desktop.in b/crates/zed/resources/zed.desktop.in
+--- a/crates/zed/resources/zed.desktop.in
++++ b/crates/zed/resources/zed.desktop.in
+@@ -9,9 +9,9 @@ TryExec=$APP_CLI
+ Exec=$APP_CLI $APP_ARGS
+ Icon=$APP_ICON
+ Categories=Utility;TextEditor;Development;IDE;
+-Keywords=zed;
++Keywords=zedha;
+ # To add Zed to "Open Folder With..." context menu, add `inode/directory` to the MimeType field (semicolon separated)
+ # Arch linux users have reported this setting Zed as default file browser. See https://github.com/zed-industries/zed/pull/39076 and related issues.
+ # If this happens to you, an unconfirmed fix may be to install Arch's `gnome-defaults-list` package.
+-MimeType=text/plain;application/x-zerosize;x-scheme-handler/zed;
++MimeType=text/plain;application/x-zerosize;x-scheme-handler/zedha;
+ Actions=NewWorkspace;

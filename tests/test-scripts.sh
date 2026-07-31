@@ -57,6 +57,60 @@ write_upstream_pin() {
 JSON
 }
 
+write_nix_lock() {
+  local path=$1 commit=$2
+  cat > "$path" <<JSON
+{"nodes":{"root":{"inputs":{"zed":"zed"}},"zed":{"locked":{"rev":"$commit"}}},"root":"root","version":7}
+JSON
+}
+
+test_check_nix_pin_accepts_match() {
+  local commit=1111111111111111111111111111111111111111
+  local pin="$test_root/nix-match-pin.json" lock="$test_root/nix-match.lock"
+  write_upstream_pin "$pin" v1.2.3 "$commit"
+  write_nix_lock "$lock" "$commit"
+  assert_file_contains <("$repo_root/scripts/check-nix-pin" "$pin" "$lock") "Nix pin matches $commit"
+}
+
+test_check_nix_pin_rejects_mismatch() {
+  local pin="$test_root/nix-mismatch-pin.json" lock="$test_root/nix-mismatch.lock" output="$test_root/nix-mismatch.out"
+  write_upstream_pin "$pin" v1.2.3 1111111111111111111111111111111111111111
+  write_nix_lock "$lock" 2222222222222222222222222222222222222222
+  if "$repo_root/scripts/check-nix-pin" "$pin" "$lock" >"$output" 2>&1; then
+    echo "expected mismatched Nix pin to fail" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" "stable.json=1111111111111111111111111111111111111111"
+  assert_file_contains "$output" "flake.lock=2222222222222222222222222222222222222222"
+}
+
+test_sync_nix_pin_updates_only_zed() {
+  local commit=3333333333333333333333333333333333333333
+  local flake_dir="$test_root/sync-flake" pin="$test_root/sync-pin.json" fake_bin="$test_root/fake-nix-bin" args="$test_root/fake-nix.args"
+  mkdir -p "$flake_dir" "$fake_bin"
+  write_upstream_pin "$pin" v1.3.0 "$commit"
+  write_nix_lock "$flake_dir/flake.lock" 1111111111111111111111111111111111111111
+  cat > "$fake_bin/nix" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$ZEDHA_FAKE_NIX_ARGS"
+for argument in "$@"; do
+  case "$argument" in github:zed-industries/zed/*) commit=${argument##*/};; esac
+done
+python3 - "$ZEDHA_FAKE_LOCK" "$commit" <<'PY'
+import json, sys
+path, commit = sys.argv[1:]
+with open(path, encoding="utf-8") as file: lock = json.load(file)
+lock["nodes"]["zed"]["locked"]["rev"] = commit
+with open(path, "w", encoding="utf-8") as file: json.dump(lock, file)
+PY
+SH
+  chmod +x "$fake_bin/nix"
+  PATH="$fake_bin:$PATH" ZEDHA_FAKE_NIX_ARGS="$args" ZEDHA_FAKE_LOCK="$flake_dir/flake.lock" \
+    "$repo_root/scripts/sync-nix-pin" "$flake_dir" "$pin"
+  assert_file_contains "$args" "flake lock --override-input zed github:zed-industries/zed/$commit $flake_dir"
+  "$repo_root/scripts/check-nix-pin" "$pin" "$flake_dir/flake.lock"
+}
+
 assert_pin_equals() {
   local path=$1
   local expected_tag=$2
@@ -158,6 +212,7 @@ create_identity_fixture() {
     "$source/crates/client/src" \
     "$source/crates/cli/src" \
     "$source/crates/install_cli/src" \
+    "$source/crates/zed/resources" \
     "$source/crates/zed/src/zed" \
     "$source/script"
 
@@ -189,6 +244,7 @@ EOF
   cat > "$source/crates/cli/src/main.rs" <<'EOF'
 name = "zedha"
 app_bundle.join("Contents/MacOS/zedha")
+"../libexec/zedha-editor"
 EOF
   cat > "$source/crates/install_cli/src/install_cli_binary.rs" <<'EOF'
 Path::new("/usr/local/bin/zedha")
@@ -205,6 +261,12 @@ EOF
     printf 'dmg_file_path="${dmg_target_directory}/Zedha-${arch_suffix}.dmg"\n'
     printf 'hdiutil create -volname Zedha\n'
   } > "$source/script/bundle-mac"
+  cat > "$source/crates/zed/resources/zed.desktop.in" <<'EOF'
+Exec=$APP_CLI $APP_ARGS
+Icon=$APP_ICON
+Keywords=zedha;
+MimeType=text/plain;x-scheme-handler/zedha;
+EOF
 }
 
 test_check_identity_rejects_mismatched_binary_name() {
@@ -287,6 +349,30 @@ test_check_identity_rejects_root_bundle_metadata() {
   fi
 
   assert_file_contains "$output" 'expected crates/zed/Cargo.toml to contain: [package.metadata.bundle-stable.bin.zedha]'
+}
+
+test_check_identity_rejects_linux_gui_name() {
+  local source="$test_root/source-with-linux-zed-name"
+  local output="$test_root/check-linux-gui-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's/zedha-editor/zed-editor/' "$source/crates/cli/src/main.rs"
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject the official Linux GUI name" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" 'expected crates/cli/src/main.rs to contain: ../libexec/zedha-editor'
+}
+
+test_check_identity_rejects_linux_url_scheme() {
+  local source="$test_root/source-with-linux-zed-scheme"
+  local output="$test_root/check-linux-scheme-output"
+  create_identity_fixture "$source" zedha
+  perl -pi -e 's|x-scheme-handler/zedha|x-scheme-handler/zed|' "$source/crates/zed/resources/zed.desktop.in"
+  if "$repo_root/scripts/check-identity" "$source" >"$output" 2>&1; then
+    echo "expected check-identity to reject the official Linux URL scheme" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" 'expected crates/zed/resources/zed.desktop.in to contain: x-scheme-handler/zedha;'
 }
 
 test_check_identity_accepts_consistent_identity() {
@@ -454,11 +540,45 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "./scripts/fetch-upstream"
   assert_file_contains "$workflow" "./scripts/apply-patches"
   assert_file_contains "$workflow" "./scripts/check-identity"
+  assert_file_contains "$workflow" "./scripts/sync-nix-pin"
+  assert_file_contains "$workflow" "git add upstream/stable.json flake.lock"
   assert_file_contains "$workflow" "gh pr list"
   assert_file_contains "$workflow" "gh pr create"
 }
 
+test_linux_workflow_builds_and_caches_zedha() {
+  local workflow="$repo_root/.github/workflows/build-linux.yml"
+  assert_file_contains "$workflow" "blacksmith-32vcpu-ubuntu-2404"
+  assert_file_contains "$workflow" "cachix/cachix-action@v16"
+  assert_file_contains "$workflow" "name: zedha"
+  assert_file_contains "$workflow" "CACHIX_AUTH_TOKEN"
+  assert_file_contains "$workflow" "./scripts/check-nix-pin"
+  assert_file_contains "$workflow" "nix flake check --no-build"
+  assert_file_contains "$workflow" "nix build .#zedha"
+  assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity"
+  assert_file_contains "$workflow" "nix build .#zedha --fallback"
+  assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity --fallback"
+
+  local package_build_line flake_check_line
+  package_build_line=$(grep -nF "nix build .#zedha" "$workflow" | head -1 | cut -d: -f1)
+  flake_check_line=$(grep -nF "nix flake check --no-build" "$workflow" | head -1 | cut -d: -f1)
+  if [[ "$package_build_line" -ge "$flake_check_line" ]]; then
+    echo "expected the package build to realize Crane sources before flake check" >&2
+    exit 1
+  fi
+}
+
+test_readme_documents_native_nix_install() {
+  assert_file_contains "$repo_root/README.md" "Install (NixOS, x86_64 Linux)"
+  assert_file_contains "$repo_root/README.md" "nix build github:rnretirwtsohg/zedha#zedha"
+  assert_file_contains "$repo_root/README.md" "zedha.cachix.org"
+  assert_file_contains "$repo_root/README.md" "Official Zed remains installed separately"
+}
+
 test_fetch_upstream_checks_out_pinned_commit
+test_check_nix_pin_accepts_match
+test_check_nix_pin_rejects_mismatch
+test_sync_nix_pin_updates_only_zed
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir
 test_check_identity_rejects_mismatched_binary_name
@@ -467,6 +587,8 @@ test_check_identity_rejects_mismatched_cli_bundle_binary
 test_check_identity_rejects_mismatched_url_handler
 test_check_identity_rejects_implicit_bundle_binary
 test_check_identity_rejects_root_bundle_metadata
+test_check_identity_rejects_linux_gui_name
+test_check_identity_rejects_linux_url_scheme
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
 test_update_upstream_pin_selects_newer_stable
@@ -477,5 +599,7 @@ test_update_upstream_pin_peels_annotated_tags
 test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
 test_upgrade_workflow_wires_detection_validation_and_pr_creation
+test_linux_workflow_builds_and_caches_zedha
+test_readme_documents_native_nix_install
 
 echo "All script tests passed"

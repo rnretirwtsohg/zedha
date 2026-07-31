@@ -11,13 +11,48 @@ ordered patch set, and packages the result.
 
 | | |
 |---|---|
-| Upstream pin | Zed **v1.12.0** (`f96212f2c50f54d93712fa130d6226b1ce7d76b5`) |
-| Published builds | **Unsigned and not notarized** Apple Silicon DMGs |
+| Upstream pin | Zed **v1.13.1** (`00bd72e7838f4b875a913cd112b47a0ebe1ca62b`) |
+| Published builds | Native Nix package for x86_64 Linux; **unsigned and not notarized** Apple Silicon DMGs |
 | Auto-updates | Not available yet |
 | Intel Macs | No published DMG yet |
 
 Native code signing, notarization, and a Zedha-owned update feed are deferred
 until Apple Developer credentials are in place.
+
+## Install (NixOS, x86_64 Linux)
+
+Zedha publishes a native Nix package for `x86_64-linux`. CI builds the package
+and uploads it to the public `zedha.cachix.org` binary cache; other Linux
+architectures and non-Nix package formats are not currently supported.
+
+For a direct smoke test:
+
+```bash
+nix build github:rnretirwtsohg/zedha#zedha --accept-flake-config
+./result/bin/zedha
+```
+
+For declarative installation, add Zedha as an independent flake input and use
+its package for the host system:
+
+```nix
+{
+  inputs.zedha.url = "github:rnretirwtsohg/zedha";
+
+  # In a NixOS or Home Manager module with inputs and pkgs in scope:
+  home.packages = [ inputs.zedha.packages.${pkgs.system}.zedha ];
+}
+```
+
+Trust `https://zedha.cachix.org` with the public key stored in
+`nix/zedha-cachix-public-key` when configuring the cache outside this flake.
+The flake's own `nixConfig` supplies both values when
+`--accept-flake-config` is used.
+
+Official Zed remains installed separately as `zed`; Zedha is launched with
+`zedha`. Their configuration namespaces are also separate:
+`~/.config/zed` and `~/.config/zedha`. Shared settings or keymaps can be
+managed declaratively by linking the same tracked files into both locations.
 
 ## Install (macOS, Apple Silicon)
 
@@ -81,7 +116,7 @@ endorsed by, or supported by Zed Industries**.
 - Upstream source and license: https://github.com/zed-industries/zed
 - This repository owns the upstream pin, downstream patches, and packaging.
 
-## Build from source
+## Build the macOS package from source
 
 Requirements: macOS, a working Rust toolchain, and the usual Zed native
 dependencies.
@@ -120,10 +155,16 @@ patches/*.patch                   ordered downstream patches
 scripts/fetch-upstream            clone pinned upstream source
 scripts/apply-patches             apply patches to a Zed checkout
 scripts/check-identity            verify patched Zedha product identity
+scripts/check-nix-pin             verify stable.json and flake.lock agree
+scripts/sync-nix-pin              synchronize the locked official Zed input
 scripts/update-upstream-pin       detect newer strict stable upstream tags
 scripts/build-macos-artifact      build a macOS DMG into artifacts/
 scripts/test                      run targeted validation
+nix/zedha.nix                     native Linux package override
+nix/check-package.nix             built Linux package identity assertions
+nix/zedha-cachix-public-key       public binary-cache signing key
 tests/test-scripts.sh             script behavior tests
+.github/workflows/build-linux.yml build and publish the Linux package
 .github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables
 ```
 
@@ -132,11 +173,13 @@ Current patches:
 ```text
 0001-terminal-launcher.patch   terminal launcher behavior
 0002-brand-as-zedha.patch      product and distribution identity
+0003-brand-linux-as-zedha.patch Linux CLI and desktop identity
 ```
 
 A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags,
-validates that the existing patches still apply, and opens a manual-review
-pull request. Nothing is auto-merged.
+updates both `upstream/stable.json` and the official Zed revision in
+`flake.lock`, validates that the existing patches still apply, and opens a
+manual-review pull request. Nothing is auto-merged.
 
 ## Troubleshooting
 

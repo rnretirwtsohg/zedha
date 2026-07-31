@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+pin_file=${1:-"$repo_root/upstream/stable.json"}
+lock_file=${2:-"$repo_root/flake.lock"}
+
+python3 - "$pin_file" "$lock_file" <<'PY'
+import json
+import sys
+
+pin_path, lock_path = sys.argv[1:]
+with open(pin_path, encoding="utf-8") as file:
+    pin = json.load(file)
+with open(lock_path, encoding="utf-8") as file:
+    lock = json.load(file)
+root = lock["nodes"][lock["root"]]
+node = root["inputs"]["zed"]
+if not isinstance(node, str):
+    raise SystemExit("locked zed input is not a direct flake node")
+locked = lock["nodes"][node]["locked"]["rev"]
+if locked != pin["commit"]:
+    raise SystemExit(f"Nix pin mismatch: stable.json={pin['commit']} flake.lock={locked}")
+print(f"Nix pin matches {locked}")
+PY
