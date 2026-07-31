@@ -558,6 +558,13 @@ test_linux_workflow_builds_and_caches_zedha() {
   assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity"
 }
 
+test_readme_documents_native_nix_install() {
+  assert_file_contains "$repo_root/README.md" "Install (NixOS, x86_64 Linux)"
+  assert_file_contains "$repo_root/README.md" "nix build github:rnretirwtsohg/zedha#zedha"
+  assert_file_contains "$repo_root/README.md" "zedha.cachix.org"
+  assert_file_contains "$repo_root/README.md" "Official Zed remains installed separately"
+}
+
 test_fetch_upstream_checks_out_pinned_commit
 test_check_nix_pin_accepts_match
 test_check_nix_pin_rejects_mismatch
@@ -583,5 +590,6 @@ test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
 test_upgrade_workflow_wires_detection_validation_and_pr_creation
 test_linux_workflow_builds_and_caches_zedha
+test_readme_documents_native_nix_install
 
 echo "All script tests passed"
