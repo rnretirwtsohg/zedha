@@ -556,6 +556,8 @@ test_linux_workflow_builds_and_caches_zedha() {
   assert_file_contains "$workflow" "nix flake check --no-build"
   assert_file_contains "$workflow" "nix build .#zedha"
   assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity"
+  assert_file_contains "$workflow" "nix build .#zedha --fallback"
+  assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity --fallback"
 
   local package_build_line flake_check_line
   package_build_line=$(grep -nF "nix build .#zedha" "$workflow" | head -1 | cut -d: -f1)
