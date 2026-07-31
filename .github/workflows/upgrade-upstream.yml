@@ -72,6 +72,16 @@ jobs:
         if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
         run: ./scripts/fetch-upstream
 
+      - name: Install Nix
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        uses: DeterminateSystems/nix-installer-action@v17
+
+      - name: Synchronize Nix pin
+        if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
+        run: |
+          ./scripts/sync-nix-pin
+          ./scripts/check-nix-pin
+
       - name: Apply Zedha patches
         if: steps.candidate.outputs.upgrade == 'true' && steps.duplicate.outputs.exists != 'true'
         run: ./scripts/apply-patches
@@ -90,7 +100,7 @@ jobs:
           git config user.name "Zedha Upgrade Bot"
           git config user.email "zedha-upgrade-bot@users.noreply.github.com"
           git switch -c "$BRANCH"
-          git add upstream/stable.json
+          git add upstream/stable.json flake.lock
           git commit -m "Upgrade Zedha to Zed $NEW_TAG"
           gh auth setup-git
           git push --set-upstream origin "$BRANCH"

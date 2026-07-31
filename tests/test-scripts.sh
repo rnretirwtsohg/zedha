@@ -540,8 +540,22 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "./scripts/fetch-upstream"
   assert_file_contains "$workflow" "./scripts/apply-patches"
   assert_file_contains "$workflow" "./scripts/check-identity"
+  assert_file_contains "$workflow" "./scripts/sync-nix-pin"
+  assert_file_contains "$workflow" "git add upstream/stable.json flake.lock"
   assert_file_contains "$workflow" "gh pr list"
   assert_file_contains "$workflow" "gh pr create"
+}
+
+test_linux_workflow_builds_and_caches_zedha() {
+  local workflow="$repo_root/.github/workflows/build-linux.yml"
+  assert_file_contains "$workflow" "blacksmith-32vcpu-ubuntu-2404"
+  assert_file_contains "$workflow" "cachix/cachix-action@v16"
+  assert_file_contains "$workflow" "name: zedha"
+  assert_file_contains "$workflow" "CACHIX_AUTH_TOKEN"
+  assert_file_contains "$workflow" "./scripts/check-nix-pin"
+  assert_file_contains "$workflow" "nix flake check --no-build"
+  assert_file_contains "$workflow" "nix build .#zedha"
+  assert_file_contains "$workflow" "nix build .#checks.x86_64-linux.package-identity"
 }
 
 test_fetch_upstream_checks_out_pinned_commit
@@ -568,5 +582,6 @@ test_update_upstream_pin_peels_annotated_tags
 test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
 test_upgrade_workflow_wires_detection_validation_and_pr_creation
+test_linux_workflow_builds_and_caches_zedha
 
 echo "All script tests passed"
