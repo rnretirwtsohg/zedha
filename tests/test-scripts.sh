@@ -397,6 +397,26 @@ SCRIPT
   assert_file_contains "$artifacts/Zedha-aarch64.dmg" "fake dmg"
 }
 
+test_release_metadata_uses_upstream_pin_and_revision() {
+  local pin="$test_root/release-pin.json"
+  write_upstream_pin "$pin" v1.20.2 7777777777777777777777777777777777777777
+
+  local output
+  output=$(bash "$repo_root/scripts/release-metadata" "$pin" 3)
+  assert_file_contains <(printf '%s\n' "$output") "upstream_tag=v1.20.2"
+  assert_file_contains <(printf '%s\n' "$output") "version=1.20.2-zedha.3"
+  assert_file_contains <(printf '%s\n' "$output") "release_tag=v1.20.2-zedha.3"
+}
+
+test_macos_workflow_publishes_pin_updates() {
+  local workflow="$repo_root/.github/workflows/build-macos.yml"
+  assert_file_contains "$workflow" "paths: [upstream/stable.json]"
+  assert_file_contains "$workflow" "bash ./scripts/release-metadata"
+  assert_file_contains "$workflow" "gh release create"
+  assert_file_contains "$workflow" "gh release upload"
+  assert_file_contains "$workflow" "contents: write"
+}
+
 test_update_upstream_pin_selects_newer_stable() {
   local upstream="$test_root/upstream-for-update"
   create_upstream_repo "$upstream"
@@ -591,6 +611,8 @@ test_check_identity_rejects_linux_gui_name
 test_check_identity_rejects_linux_url_scheme
 test_check_identity_accepts_consistent_identity
 test_build_macos_artifact_copies_zedha_dmg
+test_release_metadata_uses_upstream_pin_and_revision
+test_macos_workflow_publishes_pin_updates
 test_update_upstream_pin_selects_newer_stable
 test_update_upstream_pin_is_noop_when_current
 test_update_upstream_pin_ignores_nonstable_tags

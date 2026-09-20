@@ -1,6 +1,9 @@
 name: Build macOS Artifact
 
 on:
+  push:
+    branches: [main]
+    paths: [upstream/stable.json]
   workflow_dispatch:
     inputs:
       target:
@@ -16,19 +19,31 @@ on:
         required: true
         default: false
         type: boolean
+      publish:
+        description: Publish a GitHub Release after building
+        required: true
+        default: false
+        type: boolean
+      release_revision:
+        description: Zedha packaging revision for this upstream version
+        required: true
+        default: "1"
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.target }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.target || 'aarch64-apple-darwin' }}
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
     name: Build Zedha DMG
     # Blacksmith macOS is Apple Silicon only. Keep GitHub-hosted Intel for x86_64.
     runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'blacksmith-12vcpu-macos-15' }}
+    env:
+      TARGET: ${{ inputs.target || 'aarch64-apple-darwin' }}
     steps:
       - uses: actions/checkout@v4
       - name: Show disk space
@@ -43,12 +58,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: .work/zed -> target
-          shared-key: zedha-macos-${{ inputs.target }}
+          shared-key: zedha-macos-${{ env.TARGET }}
           # Compile outputs are handled by sccache; only reuse downloaded crates here.
           cache-targets: false
           cache-on-failure: true
       - name: Run targeted Zedha tests
-        if: ${{ inputs.run_tests }}
+        if: ${{ github.event_name == 'push' || inputs.run_tests }}
         run: ./scripts/test
       - name: Setup R2 sccache
         working-directory: .work/zed
@@ -63,13 +78,55 @@ jobs:
         env:
           # setup-sccache writes these to GITHUB_ENV; keep RUSTC_WRAPPER active for the bundle.
           CARGO_INCREMENTAL: "0"
-        run: ./scripts/build-macos-artifact .work/zed '${{ inputs.target }}'
+        run: ./scripts/build-macos-artifact .work/zed "$TARGET"
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
       - name: Upload Zedha DMG
         uses: actions/upload-artifact@v4
         with:
-          name: Zedha-${{ inputs.target }}
+          name: Zedha-${{ env.TARGET }}
           path: artifacts/*.dmg
           if-no-files-found: error
+      - name: Prepare release metadata
+        id: release
+        if: ${{ (github.event_name == 'push' || inputs.publish) && env.TARGET == 'aarch64-apple-darwin' }}
+        run: bash ./scripts/release-metadata upstream/stable.json '${{ inputs.release_revision || '1' }}' >> "$GITHUB_OUTPUT"
+      - name: Publish GitHub Release
+        if: ${{ (github.event_name == 'push' || inputs.publish) && env.TARGET == 'aarch64-apple-darwin' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.release.outputs.release_name }}
+          UPSTREAM_TAG: ${{ steps.release.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ steps.release.outputs.upstream_commit }}
+        run: |
+          dmg=artifacts/Zedha-aarch64.dmg
+          checksum="artifacts/${RELEASE_TAG#v}-SHA256SUMS"
+          shasum -a 256 "$dmg" | sed 's#  artifacts/#  #' > "$checksum"
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Zedha build based on upstream Zed **$UPSTREAM_TAG** (\`$UPSTREAM_COMMIT\`).
+
+          ## Downloads
+
+          - **Zedha-aarch64.dmg** — Apple Silicon only
+
+          ## Important: unsigned build
+
+          This DMG is not signed or notarized. Homebrew verifies its SHA-256
+          before installation and clears this app's quarantine attribute.
+
+          - No Intel build in this release
+          - No in-app update feed; install upgrades through Homebrew
+          - Not affiliated with, endorsed by, or supported by Zed Industries
+          EOF
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$dmg" "$checksum" --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_NAME" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release create "$RELEASE_TAG" "$dmg" "$checksum" \
+              --title "$RELEASE_NAME" \
+              --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
