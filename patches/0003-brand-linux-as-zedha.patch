@@ -1,7 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Naresh <ghostwriternr@gmail.com>
+Date: Sun, 20 Sep 2026 22:42:54 +0100
+Subject: [PATCH] Brand Linux package as Zedha
+
+---
+ crates/cli/src/main.rs              | 2 +-
+ crates/zed/resources/zed.desktop.in | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
 diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
+index 7676d52..aa2eaf7 100644
 --- a/crates/cli/src/main.rs
 +++ b/crates/cli/src/main.rs
-@@ -909,7 +909,7 @@ fn resolve_zed_path(cli: &Path, override_path: Option<&str>) -> Result<PathBuf> {
+@@ -909,7 +909,7 @@ mod linux {
                  // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
                  // ./zed is for the target directory in development builds.
                  let possible_locations =
@@ -11,9 +22,10 @@ diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
                      .iter()
                      .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
 diff --git a/crates/zed/resources/zed.desktop.in b/crates/zed/resources/zed.desktop.in
+index eaace15..04efa57 100644
 --- a/crates/zed/resources/zed.desktop.in
 +++ b/crates/zed/resources/zed.desktop.in
-@@ -9,9 +9,9 @@ TryExec=$APP_CLI
+@@ -9,11 +9,11 @@ StartupNotify=$DO_STARTUP_NOTIFY
  Exec=$APP_CLI $APP_ARGS
  Icon=$APP_ICON
  Categories=Utility;TextEditor;Development;IDE;
@@ -25,3 +37,5 @@ diff --git a/crates/zed/resources/zed.desktop.in b/crates/zed/resources/zed.desk
 -MimeType=text/plain;application/x-zerosize;x-scheme-handler/zed;
 +MimeType=text/plain;application/x-zerosize;x-scheme-handler/zedha;
  Actions=NewWorkspace;
+ 
+ [Desktop Action NewWorkspace]

@@ -1,17 +1,35 @@
-From zedha-brand-v1.12.0 Mon Sep 17 00:00:00 2001
-Subject: [PATCH] Brand stable macOS build as Zedha
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Naresh <ghostwriternr@gmail.com>
+Date: Sun, 20 Sep 2026 22:42:54 +0100
+Subject: [PATCH] Brand stable build as Zedha
 
-Keep product identity separate from terminal launcher behavior so either
-concern can be refreshed or removed independently.
-
-Generated against Zed v1.12.0 (f96212f2c50f54d93712fa130d6226b1ce7d76b5).
 ---
+ crates/agent_skills/agent_skills.rs           | 22 ++++-----
+ crates/cli/src/main.rs                        | 26 +++++-----
+ crates/client/src/client.rs                   |  6 +--
+ crates/client/src/zed_urls.rs                 |  4 +-
+ crates/install_cli/src/install_cli_binary.rs  | 14 +++---
+ crates/install_cli/src/register_zed_scheme.rs |  2 +-
+ crates/paths/src/paths.rs                     |  2 +-
+ crates/release_channel/src/lib.rs             |  8 ++--
+ crates/settings_ui/src/settings_ui.rs         |  2 +-
+ crates/terminal/src/alacritty/hyperlinks.rs   |  7 ++-
+ crates/zed/Cargo.toml                         | 12 ++---
+ crates/zed/resources/info/DocumentTypes.plist |  2 +-
+ crates/zed/resources/info/Permissions.plist   | 24 +++++-----
+ crates/zed/src/main.rs                        |  8 ++--
+ crates/zed/src/zed.rs                         |  4 +-
+ crates/zed/src/zed/open_listener.rs           | 48 +++++++++----------
+ crates/zed/src/zed/open_url_modal.rs          |  6 +--
+ crates/zed/src/zed/windows_only_instance.rs   |  2 +-
+ script/bundle-mac                             | 18 +++----
+ 19 files changed, 111 insertions(+), 106 deletions(-)
 
 diff --git a/crates/agent_skills/agent_skills.rs b/crates/agent_skills/agent_skills.rs
-index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d28c80133 100644
+index 7153b5e..6362d5a 100644
 --- a/crates/agent_skills/agent_skills.rs
 +++ b/crates/agent_skills/agent_skills.rs
-@@ -799,19 +799,19 @@ pub fn is_agents_skills_path(path: &Path) -> bool {
+@@ -796,19 +796,19 @@ pub fn is_agents_skills_path(path: &Path) -> bool {
      false
  }
  
@@ -36,7 +54,7 @@ index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d
  /// `SKILL.md` file contents.
  ///
  /// The contents are base64url-encoded (no padding) so the link is
-@@ -827,7 +827,7 @@ pub fn encode_skill_share_link(skill_file_content: &str) -> String {
+@@ -824,7 +824,7 @@ pub fn encode_skill_share_link(skill_file_content: &str) -> String {
      url.into()
  }
  
@@ -45,7 +63,7 @@ index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d
  /// produced by [`encode_skill_share_link`].
  pub fn decode_skill_share_link(link: &str) -> Result<String> {
      use base64::Engine as _;
-@@ -2170,7 +2170,7 @@ description: A skill with no body content
+@@ -2187,7 +2187,7 @@ description: A skill with no body content
              "---\nname: my-skill\ndescription: Does a thing.\n---\n\n## Steps\n\nDo the thing.\n";
          let link = encode_skill_share_link(content);
          let data = link
@@ -54,7 +72,7 @@ index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d
              .expect("link should start with the skill share prefix");
          // base64url (no-pad) output must not require percent-encoding.
          assert!(!data.contains('+') && !data.contains('/') && !data.contains('='));
-@@ -2179,9 +2179,9 @@ description: A skill with no body content
+@@ -2196,9 +2196,9 @@ description: A skill with no body content
  
      #[test]
      fn decode_skill_share_link_rejects_non_skill_links() {
@@ -69,7 +87,7 @@ index 731a1cb23c7354329a9942d7ece98fe118e869f4..87df2f56dabacd1e6bff74e15f822f2d
      }
  }
 diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
-index 565f97ff2305551801429bc2adc7dfc21f0c35c8..1b64a53bb45ec9a59967bd9f15e5146fdc917e95 100644
+index 0f4d674..7676d52 100644
 --- a/crates/cli/src/main.rs
 +++ b/crates/cli/src/main.rs
 @@ -31,7 +31,7 @@ use walkdir::WalkDir;
@@ -113,7 +131,7 @@ index 565f97ff2305551801429bc2adc7dfc21f0c35c8..1b64a53bb45ec9a59967bd9f15e5146f
  )]
  struct Args {
      /// Wait for all of the given paths to be opened/closed before exiting.
-@@ -1415,7 +1415,7 @@ mod mac_os {
+@@ -1452,7 +1452,7 @@ mod mac_os {
              user_data_dir: Option<&str>,
          ) -> io::Result<ExitStatus> {
              let path = match self {
@@ -122,7 +140,7 @@ index 565f97ff2305551801429bc2adc7dfc21f0c35c8..1b64a53bb45ec9a59967bd9f15e5146f
                  Bundle::LocalPath { executable, .. } => executable.clone(),
              };
  
-@@ -1429,7 +1429,7 @@ mod mac_os {
+@@ -1466,7 +1466,7 @@ mod mac_os {
  
          fn path(&self) -> PathBuf {
              match self {
@@ -132,10 +150,10 @@ index 565f97ff2305551801429bc2adc7dfc21f0c35c8..1b64a53bb45ec9a59967bd9f15e5146f
              }
          }
 diff --git a/crates/client/src/client.rs b/crates/client/src/client.rs
-index 2c8dfa8ba47ef7eced841f6d965d576f30a02e6a..2f66c8502e93428c61c6215315d87b50cfe6ad4c 100644
+index c12ea19..c60d390 100644
 --- a/crates/client/src/client.rs
 +++ b/crates/client/src/client.rs
-@@ -1936,13 +1936,13 @@ impl ProtoClient for Client {
+@@ -1938,13 +1938,13 @@ impl ProtoClient for Client {
      }
  }
  
@@ -153,7 +171,7 @@ index 2c8dfa8ba47ef7eced841f6d965d576f30a02e6a..2f66c8502e93428c61c6215315d87b50
      /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
      ChannelNotes {
 diff --git a/crates/client/src/zed_urls.rs b/crates/client/src/zed_urls.rs
-index d9cd62552265d41bbf17f7599ac3fa7e8869f444..5fa2d1b40aa1849886d7558db44d29c88884888c 100644
+index d9cd625..5fa2d1b 100644
 --- a/crates/client/src/zed_urls.rs
 +++ b/crates/client/src/zed_urls.rs
 @@ -8,7 +8,7 @@ use gpui::App;
@@ -173,7 +191,7 @@ index d9cd62552265d41bbf17f7599ac3fa7e8869f444..5fa2d1b40aa1849886d7558db44d29c8
 +    format!("{ZED_URL_SCHEME}://agent/shared/{session_id}")
  }
 diff --git a/crates/install_cli/src/install_cli_binary.rs b/crates/install_cli/src/install_cli_binary.rs
-index a88816ace138f9119ca7b8a88f9fd3569bbb0ef9..fec08add1a9bdec2fc156f6c6cda345d1fdf9bb9 100644
+index a88816a..fec08ad 100644
 --- a/crates/install_cli/src/install_cli_binary.rs
 +++ b/crates/install_cli/src/install_cli_binary.rs
 @@ -12,7 +12,7 @@ use workspace::{Toast, Workspace};
@@ -233,7 +251,7 @@ index a88816ace138f9119ca7b8a88f9fd3569bbb0ef9..fec08add1a9bdec2fc156f6c6cda345d
 +    .detach_and_prompt_err("Cannot install the Zedha CLI", window, cx, |_, _, _| None);
  }
 diff --git a/crates/install_cli/src/register_zed_scheme.rs b/crates/install_cli/src/register_zed_scheme.rs
-index 048b2dd50ab5355872de6718284106ba19c89b9a..74764313e269563d0a028853a3ce02b10cd6386a 100644
+index 048b2dd..7476431 100644
 --- a/crates/install_cli/src/register_zed_scheme.rs
 +++ b/crates/install_cli/src/register_zed_scheme.rs
 @@ -4,7 +4,7 @@ use gpui::{AsyncApp, actions};
@@ -246,7 +264,7 @@ index 048b2dd50ab5355872de6718284106ba19c89b9a..74764313e269563d0a028853a3ce02b1
      ]
  );
 diff --git a/crates/paths/src/paths.rs b/crates/paths/src/paths.rs
-index 9c16f1db289585280e7919297c43085a5a76fdf2..8f65260ef9a6c28ded1e2e412db6977cec1245c6 100644
+index 9c16f1d..8f65260 100644
 --- a/crates/paths/src/paths.rs
 +++ b/crates/paths/src/paths.rs
 @@ -15,7 +15,7 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
@@ -259,10 +277,10 @@ index 9c16f1db289585280e7919297c43085a5a76fdf2..8f65260ef9a6c28ded1e2e412db6977c
  /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
  /// Linux/FreeBSD and the macOS `~/.config` fallback.
 diff --git a/crates/release_channel/src/lib.rs b/crates/release_channel/src/lib.rs
-index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec6b5c3341 100644
+index c79ca14..35dbc97 100644
 --- a/crates/release_channel/src/lib.rs
 +++ b/crates/release_channel/src/lib.rs
-@@ -185,7 +185,7 @@ impl ReleaseChannel {
+@@ -199,7 +199,7 @@ impl ReleaseChannel {
  
      /// Returns whether we want to poll for updates for this [`ReleaseChannel`]
      pub fn poll_for_updates(&self) -> bool {
@@ -271,7 +289,7 @@ index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec
      }
  
      /// Returns the display name for this [`ReleaseChannel`].
-@@ -194,7 +194,7 @@ impl ReleaseChannel {
+@@ -208,7 +208,7 @@ impl ReleaseChannel {
              ReleaseChannel::Dev => "Zed Dev",
              ReleaseChannel::Nightly => "Zed Nightly",
              ReleaseChannel::Preview => "Zed Preview",
@@ -280,7 +298,7 @@ index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec
          }
      }
  
-@@ -204,7 +204,7 @@ impl ReleaseChannel {
+@@ -218,7 +218,7 @@ impl ReleaseChannel {
              ReleaseChannel::Dev => "dev",
              ReleaseChannel::Nightly => "nightly",
              ReleaseChannel::Preview => "preview",
@@ -289,7 +307,7 @@ index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec
          }
      }
  
-@@ -216,7 +216,7 @@ impl ReleaseChannel {
+@@ -230,7 +230,7 @@ impl ReleaseChannel {
              ReleaseChannel::Dev => "dev.zed.Zed-Dev",
              ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
              ReleaseChannel::Preview => "dev.zed.Zed-Preview",
@@ -299,10 +317,10 @@ index ca3aff66e1ca6292d66d4e4198a1e5c6171f5a30..efc0d1be16da00e1174180716b3cdfec
      }
  
 diff --git a/crates/settings_ui/src/settings_ui.rs b/crates/settings_ui/src/settings_ui.rs
-index f3cf844d78e66c4997cf6c71e1f0b9f1e002a5bb..617cc1f100a2254a11d01697c8c4923b422a7a6a 100644
+index 12ede65..989035f 100644
 --- a/crates/settings_ui/src/settings_ui.rs
 +++ b/crates/settings_ui/src/settings_ui.rs
-@@ -1549,7 +1549,7 @@ fn render_settings_item_link(
+@@ -1574,7 +1574,7 @@ fn render_settings_item_link(
                  .tooltip(Tooltip::text("Copy Link"))
                  .when_some(json_path, |this, path| {
                      this.on_click(cx.listener(move |this, _, _, cx| {
@@ -312,7 +330,7 @@ index f3cf844d78e66c4997cf6c71e1f0b9f1e002a5bb..617cc1f100a2254a11d01697c8c4923b
                          this.last_copied_link_path = Some(path);
                          cx.notify();
 diff --git a/crates/terminal/src/alacritty/hyperlinks.rs b/crates/terminal/src/alacritty/hyperlinks.rs
-index 1dbec598c098d786c47cfd9e922849eb473b7d63..ec2e8d614679b0bebfdb01a46ae1798ee520bdc3 100644
+index cabf1d3..db08f6c 100644
 --- a/crates/terminal/src/alacritty/hyperlinks.rs
 +++ b/crates/terminal/src/alacritty/hyperlinks.rs
 @@ -19,7 +19,7 @@ use util::paths::{PathStyle, UrlExt};
@@ -324,7 +342,7 @@ index 1dbec598c098d786c47cfd9e922849eb473b7d63..ec2e8d614679b0bebfdb01a46ae1798e
  const WIDE_CHAR_SPACERS: Flags =
      Flags::from_bits(Flags::LEADING_WIDE_CHAR_SPACER.bits() | Flags::WIDE_CHAR_SPACER.bits())
          .unwrap();
-@@ -523,6 +523,11 @@ mod tests {
+@@ -524,6 +524,11 @@ mod tests {
              "open zed://channel/the-channel and zed://settings/theme now",
              vec!["zed://channel/the-channel", "zed://settings/theme"],
          );
@@ -337,10 +355,10 @@ index 1dbec598c098d786c47cfd9e922849eb473b7d63..ec2e8d614679b0bebfdb01a46ae1798e
  
      #[test]
 diff --git a/crates/zed/Cargo.toml b/crates/zed/Cargo.toml
-index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1dba8861f72 100644
+index ecf58bf..795ef8e 100644
 --- a/crates/zed/Cargo.toml
 +++ b/crates/zed/Cargo.toml
-@@ -6,7 +6,7 @@ version = "1.12.0"
+@@ -6,7 +6,7 @@ version = "1.20.2"
  publish.workspace = true
  license = "GPL-3.0-or-later"
  authors = ["Zed Team <hi@zed.dev>"]
@@ -349,7 +367,7 @@ index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1db
  
  [lints]
  workspace = true
-@@ -54,7 +54,7 @@ visual-tests = [
+@@ -59,7 +59,7 @@ visual-tests = [
  ]
  
  [[bin]]
@@ -358,7 +376,9 @@ index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1db
  path = "src/main.rs"
  
  [[bin]]
-@@ -301,11 +301,11 @@ osx_url_schemes = ["zed"]
+@@ -306,13 +306,13 @@ osx_minimum_system_version = "10.15.7"
+ osx_info_plist_exts = ["resources/info/*"]
+ osx_url_schemes = ["zed"]
  
 -[package.metadata.bundle-stable]
 +[package.metadata.bundle-stable.bin.zedha]
@@ -372,10 +392,10 @@ index f5f4a82dd8c1bb809bf4882cd4a3d7fa41c34981..042d1d41d30278af2b8ef0d656a1e1db
 -osx_url_schemes = ["zed"]
 +osx_url_schemes = ["zedha"]
  
- [package.metadata.cargo-machete]
- ignored = ["profiling", "zstd", "tracing"]
+ [package.metadata.cargo-shear]
+ ignored = ["profiling", "tracing"]
 diff --git a/crates/zed/resources/info/DocumentTypes.plist b/crates/zed/resources/info/DocumentTypes.plist
-index 0a509d9ddcf283fd660d0b2d13641a0f85e3fc36..328c103a9a9948dcae4b7ecb5fa5688917742e82 100644
+index 0a509d9..328c103 100644
 --- a/crates/zed/resources/info/DocumentTypes.plist
 +++ b/crates/zed/resources/info/DocumentTypes.plist
 @@ -19,7 +19,7 @@
@@ -388,10 +408,10 @@ index 0a509d9ddcf283fd660d0b2d13641a0f85e3fc36..328c103a9a9948dcae4b7ecb5fa56889
          <string>Editor</string>
          <key>CFBundleTypeOSTypes</key>
 diff --git a/crates/zed/resources/info/Permissions.plist b/crates/zed/resources/info/Permissions.plist
-index bded5a82e2c81d811b8186dde97736170a74b425..f07cceb0a5044a0b0f1388f957bb899d246e9805 100644
+index 04a89fb..fd14f61 100644
 --- a/crates/zed/resources/info/Permissions.plist
 +++ b/crates/zed/resources/info/Permissions.plist
-@@ -1,24 +1,24 @@
+@@ -1,26 +1,26 @@
  <key>NSSystemAdministrationUsageDescription</key>
 -<string>The operation being performed by a program in Zed requires elevated permission.</string>
 +<string>The operation being performed by a program in Zedha requires elevated permission.</string>
@@ -428,11 +448,13 @@ index bded5a82e2c81d811b8186dde97736170a74b425..f07cceb0a5044a0b0f1388f957bb899d
  <key>NSRemindersUsageDescription</key>
 -<string>An application in Zed wants to use your reminders.</string>
 +<string>An application in Zedha wants to use your reminders.</string>
+ <key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key>
+ <true/>
 diff --git a/crates/zed/src/main.rs b/crates/zed/src/main.rs
-index eb933cc16e62b5f3a9d5c00dd8557cc4bc3981d7..f21c0986513b44abda5689a4553988674de040af 100644
+index 04c1d0a..1d749f7 100644
 --- a/crates/zed/src/main.rs
 +++ b/crates/zed/src/main.rs
-@@ -1041,7 +1041,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
+@@ -1064,7 +1064,7 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut
                                  });
                              } else {
                                  log::warn!(
@@ -441,7 +463,7 @@ index eb933cc16e62b5f3a9d5c00dd8557cc4bc3981d7..f21c0986513b44abda5689a455398867
                                       (is `disable_ai` enabled?)"
                                  );
                              }
-@@ -1666,14 +1666,14 @@ fn stdout_is_a_pty() -> bool {
+@@ -1689,14 +1689,14 @@ fn stdout_is_a_pty() -> bool {
  }
  
  #[derive(Parser, Debug)]
@@ -458,7 +480,7 @@ index eb933cc16e62b5f3a9d5c00dd8557cc4bc3981d7..f21c0986513b44abda5689a455398867
      paths_or_urls: Vec<String>,
  
      /// Pairs of file paths to diff. Can be specified multiple times.
-@@ -1793,7 +1793,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
+@@ -1811,7 +1811,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
          Ok(path) => format!("file://{}", path.display()),
          Err(_) => {
              if arg.starts_with("file://")
@@ -468,10 +490,10 @@ index eb933cc16e62b5f3a9d5c00dd8557cc4bc3981d7..f21c0986513b44abda5689a455398867
                  || arg.starts_with("ssh://")
                  || parse_zed_link(arg, cx).is_some()
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 3b302738ae217e2a8f02abb804c7e38f5f64fcbc..ce930e7fe0d6a463b035c564cbed006c9e2ad2c0 100644
+index ed1ed3a..adb9eeb 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -1215,7 +1215,7 @@ fn register_actions(
+@@ -1279,7 +1279,7 @@ fn register_actions(
                          Toast::new(
                              NotificationId::unique::<RegisterZedScheme>(),
                              format!(
@@ -480,7 +502,7 @@ index 3b302738ae217e2a8f02abb804c7e38f5f64fcbc..ce930e7fe0d6a463b035c564cbed006c
                                  ReleaseChannel::global(cx).display_name()
                              ),
                          ),
-@@ -1225,7 +1225,7 @@ fn register_actions(
+@@ -1289,7 +1289,7 @@ fn register_actions(
                  Ok(())
              })
              .detach_and_prompt_err(
@@ -490,10 +512,10 @@ index 3b302738ae217e2a8f02abb804c7e38f5f64fcbc..ce930e7fe0d6a463b035c564cbed006c
                  cx,
                  |_, _, _| None,
 diff --git a/crates/zed/src/zed/open_listener.rs b/crates/zed/src/zed/open_listener.rs
-index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3a407c9d1 100644
+index 0675fdd..2a060a8 100644
 --- a/crates/zed/src/zed/open_listener.rs
 +++ b/crates/zed/src/zed/open_listener.rs
-@@ -60,7 +60,7 @@ pub enum OpenRequestKind {
+@@ -61,7 +61,7 @@ pub enum OpenRequestKind {
          external_source_prompt: Option<ExternalSourcePrompt>,
      },
      InstallSkill {
@@ -502,7 +524,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
          content: String,
      },
      DockMenuAction {
-@@ -162,34 +162,34 @@ impl OpenRequest {
+@@ -163,34 +163,34 @@ impl OpenRequest {
                  });
              } else if let Some(file) = url.strip_prefix("file://") {
                  this.parse_file_path(file)
@@ -547,7 +569,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                  this.parse_git_commit_url(commit_path)?
              } else if url.starts_with("ssh://") {
                  this.parse_ssh_file_path(&url, cx)?
-@@ -233,7 +233,7 @@ impl OpenRequest {
+@@ -234,7 +234,7 @@ impl OpenRequest {
      }
  
      fn parse_skill_install_url(&mut self, url: &str) -> Result<()> {
@@ -556,7 +578,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
          let content = agent_skills::decode_skill_share_link(url)?;
          self.kind = Some(OpenRequestKind::InstallSkill { content });
          Ok(())
-@@ -1415,7 +1415,7 @@ mod tests {
+@@ -1476,7 +1476,7 @@ mod tests {
          let request = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -565,7 +587,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -1469,7 +1469,7 @@ mod tests {
+@@ -1530,7 +1530,7 @@ mod tests {
          let result = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -574,7 +596,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -1480,7 +1480,7 @@ mod tests {
+@@ -1541,7 +1541,7 @@ mod tests {
      }
  
      fn agent_url_with_prompt(prompt: &str) -> String {
@@ -583,7 +605,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
          serializer.append_pair("prompt", prompt);
          serializer.finish()
      }
-@@ -1523,7 +1523,7 @@ mod tests {
+@@ -1584,7 +1584,7 @@ mod tests {
          let request = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -592,7 +614,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -1550,7 +1550,7 @@ mod tests {
+@@ -1611,7 +1611,7 @@ mod tests {
      fn test_parse_focus_app_url(cx: &mut TestAppContext) {
          let _app_state = init_test(cx);
  
@@ -601,7 +623,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
              let request = cx.update(|cx| {
                  OpenRequest::parse(
                      RawOpenRequest {
-@@ -1606,7 +1606,7 @@ mod tests {
+@@ -1667,7 +1667,7 @@ mod tests {
          let request = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -610,7 +632,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -1627,7 +1627,7 @@ mod tests {
+@@ -1688,7 +1688,7 @@ mod tests {
          let request = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -619,7 +641,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -1648,7 +1648,7 @@ mod tests {
+@@ -1709,7 +1709,7 @@ mod tests {
              assert!(
                  OpenRequest::parse(
                      RawOpenRequest {
@@ -628,7 +650,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                          ..Default::default()
                      },
                      cx,
-@@ -1663,7 +1663,7 @@ mod tests {
+@@ -1724,7 +1724,7 @@ mod tests {
          let result = cx.update(|cx| {
              OpenRequest::parse(
                  RawOpenRequest {
@@ -637,7 +659,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ..Default::default()
                  },
                  cx,
-@@ -2025,7 +2025,7 @@ mod tests {
+@@ -2086,7 +2086,7 @@ mod tests {
              OpenRequest::parse(
                  RawOpenRequest {
                      urls: vec![
@@ -646,7 +668,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ],
                      ..Default::default()
                  },
-@@ -2050,7 +2050,7 @@ mod tests {
+@@ -2111,7 +2111,7 @@ mod tests {
              OpenRequest::parse(
                  RawOpenRequest {
                      urls: vec![
@@ -655,7 +677,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ],
                      ..Default::default()
                  },
-@@ -2075,7 +2075,7 @@ mod tests {
+@@ -2136,7 +2136,7 @@ mod tests {
              OpenRequest::parse(
                  RawOpenRequest {
                      urls: vec![
@@ -665,7 +687,7 @@ index d59e80a35d2350dbf3bf585faa19a355417511fd..f3a74223f58c0388b26e36d8f89b9bf3
                      ],
                      ..Default::default()
 diff --git a/crates/zed/src/zed/open_url_modal.rs b/crates/zed/src/zed/open_url_modal.rs
-index d143dc0ba0919ac444e84b56d96271dde4df6587..59d8e0b18e41168591d31a7239d7a259f1f1e1d0 100644
+index d143dc0..59d8e0b 100644
 --- a/crates/zed/src/zed/open_url_modal.rs
 +++ b/crates/zed/src/zed/open_url_modal.rs
 @@ -27,7 +27,7 @@ impl OpenUrlModal {
@@ -689,7 +711,7 @@ index d143dc0ba0919ac444e84b56d96271dde4df6587..59d8e0b18e41168591d31a7239d7a259
                  urls: vec![url],
                  ..Default::default()
 diff --git a/crates/zed/src/zed/windows_only_instance.rs b/crates/zed/src/zed/windows_only_instance.rs
-index c43e4f9e198eac10a281a1f904efddcdaefac1b3..bed6fa655de2b771e71e8919aef30f2e242cb445 100644
+index c43e4f9..bed6fa6 100644
 --- a/crates/zed/src/zed/windows_only_instance.rs
 +++ b/crates/zed/src/zed/windows_only_instance.rs
 @@ -126,7 +126,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
@@ -702,7 +724,7 @@ index c43e4f9e198eac10a281a1f904efddcdaefac1b3..bed6fa655de2b771e71e8919aef30f2e
                          || path.starts_with("https://")
                          || path.starts_with("file://")
 diff --git a/script/bundle-mac b/script/bundle-mac
-index eae4f861baeb043602eb4af26f7e285d79b9586f..0e3b056a767d1fcf1ef7df1125b825c8fa3680b8 100755
+index 4194d0f..3113f17 100755
 --- a/script/bundle-mac
 +++ b/script/bundle-mac
 @@ -100,7 +100,7 @@ sed \
@@ -741,18 +763,16 @@ index eae4f861baeb043602eb4af26f7e285d79b9586f..0e3b056a767d1fcf1ef7df1125b825c8
  
          # If someone runs this bundle script locally, a symlink will be placed in `dmg_source_directory`.
          # This symlink causes CPU issues with Zed if the Zed codebase is the project being worked on, so we simply remove it for now.
-@@ -297,8 +297,8 @@ function upload_debug_symbols() {
-         echo "local install; skipping sentry upload."
-     elif [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
-         echo "Uploading zed debug symbols to sentry..."
--        exe_path="target/${target_triple}/release/Zed"
--        if ! dsymutil --flat "target/${target_triple}/${target_dir}/zed" 2> target/dsymutil.log; then
-+        exe_path="target/${target_triple}/release/zedha"
-+        if ! dsymutil --flat "target/${target_triple}/${target_dir}/zedha" 2> target/dsymutil.log; then
-             echo "dsymutil failed"
-             cat target/dsymutil.log
-             exit 1
-@@ -314,7 +314,7 @@ function upload_debug_symbols() {
+@@ -298,7 +298,7 @@ function extract_debug_symbols() {
+         return
+     fi
+     debug_symbols_extracted=true
+-    if ! dsymutil --flat "target/${target_triple}/${target_dir}/zed" 2> target/dsymutil.log; then
++    if ! dsymutil --flat "target/${target_triple}/${target_dir}/zedha" 2> target/dsymutil.log; then
+         echo "dsymutil failed"
+         cat target/dsymutil.log
+         exit 1
+@@ -320,7 +320,7 @@ function upload_debug_symbols() {
          for attempt in 1 2 3; do
              echo "Sentry upload attempt $attempt..."
              if sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev \
@@ -761,9 +781,21 @@ index eae4f861baeb043602eb4af26f7e285d79b9586f..0e3b056a767d1fcf1ef7df1125b825c8
                  "target/${target_triple}/${target_dir}/remote_server.dwarf"; then
                  break
              else
-@@ -332,7 +332,7 @@ function upload_debug_symbols() {
+@@ -338,17 +338,17 @@ function upload_debug_symbols() {
  
  upload_debug_symbols
+ 
+-# Sentry receives the extracted zed.dwarf, not the binary, so debug symbols
++# Sentry receives the extracted zedha.dwarf, not the binary, so debug symbols
+ # must be extracted before the binaries are stripped below. The .dwarf files
+ # also keep symbols recoverable when the sentry upload is skipped.
+ if [[ "$target_dir" == "release" && "$local_install" != true ]]; then
+     extract_debug_symbols
+-    strip -x "target/${target_triple}/${target_dir}/zed"
++    strip -x "target/${target_triple}/${target_dir}/zedha"
+     strip -x "target/${target_triple}/${target_dir}/cli"
+     strip -x "target/${target_triple}/${target_dir}/remote_server"
+ fi
  
 -cp target/${target_triple}/${target_dir}/zed "${app_path}/Contents/MacOS/zed"
 +cp target/${target_triple}/${target_dir}/zedha "${app_path}/Contents/MacOS/zedha"

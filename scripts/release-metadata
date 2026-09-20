@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+pin_file=${1:-"$repo_root/upstream/stable.json"}
+revision=${2:-1}
+
+if [[ ! "$revision" =~ ^[1-9][0-9]*$ ]]; then
+  echo "release revision must be a positive integer: $revision" >&2
+  exit 1
+fi
+
+python3 - "$pin_file" "$revision" <<'PY'
+import json
+from pathlib import Path
+import re
+import sys
+
+pin_path = Path(sys.argv[1])
+revision = sys.argv[2]
+
+try:
+    with pin_path.open(encoding="utf-8") as file:
+        pin = json.load(file)
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid upstream pin {pin_path}: {error}")
+
+tag = pin.get("tag") if isinstance(pin, dict) else None
+commit = pin.get("commit") if isinstance(pin, dict) else None
+if not isinstance(tag, str) or re.fullmatch(r"v\d+\.\d+\.\d+", tag) is None:
+    raise SystemExit(f"invalid upstream tag in {pin_path}")
+if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+    raise SystemExit(f"invalid upstream commit in {pin_path}")
+
+version = tag.removeprefix("v")
+release_version = f"{version}-zedha.{revision}"
+print(f"upstream_tag={tag}")
+print(f"upstream_commit={commit}")
+print(f"version={release_version}")
+print(f"release_tag=v{release_version}")
+print(f"release_name=Zedha v{release_version}")
+PY

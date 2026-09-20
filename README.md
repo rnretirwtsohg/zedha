@@ -11,13 +11,14 @@ ordered patch set, and packages the result.
 
 | | |
 |---|---|
-| Upstream pin | Zed **v1.13.1** (`00bd72e7838f4b875a913cd112b47a0ebe1ca62b`) |
+| Upstream pin | Zed **v1.20.2** (`7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f`) |
 | Published builds | Native Nix package for x86_64 Linux; **unsigned and not notarized** Apple Silicon DMGs |
-| Auto-updates | Not available yet |
+| Updates | Homebrew-managed on macOS; no in-app update feed |
 | Intel Macs | No published DMG yet |
 
-Native code signing, notarization, and a Zedha-owned update feed are deferred
-until Apple Developer credentials are in place.
+Native code signing, notarization, and an in-app update feed are deferred until
+Apple Developer credentials are in place. Merged upstream upgrades publish a
+new DMG, and the Homebrew tap picks it up automatically.
 
 ## Install (NixOS, x86_64 Linux)
 
@@ -55,6 +56,15 @@ Official Zed remains installed separately as `zed`; Zedha is launched with
 managed declaratively by linking the same tracked files into both locations.
 
 ## Install (macOS, Apple Silicon)
+
+Homebrew is recommended because it installs subsequent Zedha releases through
+the normal `brew upgrade` flow:
+
+```bash
+brew install --cask rnretirwtsohg/zedha/zedha
+```
+
+To install manually instead:
 
 1. Download `Zedha-aarch64.dmg` from the
    [latest GitHub Release](https://github.com/rnretirwtsohg/zedha/releases/latest).
@@ -158,6 +168,7 @@ scripts/check-identity            verify patched Zedha product identity
 scripts/check-nix-pin             verify stable.json and flake.lock agree
 scripts/sync-nix-pin              synchronize the locked official Zed input
 scripts/update-upstream-pin       detect newer strict stable upstream tags
+scripts/release-metadata          derive release identity from the upstream pin
 scripts/build-macos-artifact      build a macOS DMG into artifacts/
 scripts/test                      run targeted validation
 nix/zedha.nix                     native Linux package override
@@ -165,6 +176,7 @@ nix/check-package.nix             built Linux package identity assertions
 nix/zedha-cachix-public-key       public binary-cache signing key
 tests/test-scripts.sh             script behavior tests
 .github/workflows/build-linux.yml build and publish the Linux package
+.github/workflows/build-macos.yml build and publish the macOS release
 .github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables
 ```
 
@@ -179,7 +191,9 @@ Current patches:
 A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags,
 updates both `upstream/stable.json` and the official Zed revision in
 `flake.lock`, validates that the existing patches still apply, and opens a
-manual-review pull request. Nothing is auto-merged.
+manual-review pull request. Nothing is auto-merged. Merging the pull request
+builds and publishes the Apple Silicon DMG; the Homebrew tap checks for new
+releases hourly and updates its cask.
 
 ## Troubleshooting
 
@@ -187,7 +201,7 @@ manual-review pull request. Nothing is auto-merged.
 |--------|------------|
 | “Zedha is damaged and can’t be opened” / blocked on first launch | Expected for unsigned builds. Right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Zedha.app`. |
 | `zedha: command not found` | Open Zedha and use **Install CLI**, or call `/Applications/Zedha.app/Contents/MacOS/cli` directly. |
-| No update notifications | Expected. Auto-updates need signed builds and a Zedha update feed. |
+| No in-app update notifications | Expected. Run `brew upgrade --cask zedha`; the tap tracks published Zedha releases. |
 | Need an Intel Mac build | Not published yet. Build locally with the appropriate target, or wait. |
 | Bug that also happens in upstream Zed | Report it to [zed-industries/zed](https://github.com/zed-industries/zed). Zedha-only issues belong in this repo. |
 
