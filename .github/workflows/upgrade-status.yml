@@ -1,0 +1,125 @@
+name: Report Upgrade Status
+
+on:
+  workflow_run:
+    workflows:
+      - Test
+      - Build Linux Package
+      - Build macOS Artifact
+    types: [completed]
+  push:
+    branches: [main]
+    paths: [upstream/stable.json]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upgrade-status-${{ github.event.workflow_run.head_sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  merge-upgrade:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.head_branch == 'automation/upgrade-zed-latest' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge after every gate passes
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          pr=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --head automation/upgrade-zed-latest \
+            --json number,headRefOid \
+            --jq '.[0] // empty')
+          if [[ -z "$pr" || "$(jq -r .headRefOid <<< "$pr")" != "$HEAD_SHA" ]]; then
+            exit 0
+          fi
+
+          pr_number=$(jq -r .number <<< "$pr")
+          checks=$(gh pr view "$pr_number" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json statusCheckRollup \
+            --jq '.statusCheckRollup')
+          while IFS='|' read -r workflow check; do
+            passed=$(jq \
+              --arg workflow "$workflow" \
+              --arg check "$check" \
+              '[.[] | select(
+                .workflowName == $workflow and
+                .name == $check and
+                .status == "COMPLETED" and
+                .conclusion == "SUCCESS"
+              )] | length' <<< "$checks")
+            if [[ "$passed" -ne 1 ]]; then
+              echo "Waiting for $workflow / $check"
+              exit 0
+            fi
+          done <<'EOF'
+          Test|Script tests
+          Test|Apply patches
+          Test|Targeted Zedha tests
+          Build Linux Package|Build Zedha package
+          Build macOS Artifact|Build Zedha DMG
+          EOF
+
+          gh pr merge "$pr_number" \
+            --repo "$GITHUB_REPOSITORY" \
+            --squash \
+            --delete-branch
+
+  report-failure:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.head_branch == 'automation/upgrade-zed-latest' &&
+      github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or update blocker issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          title="Automated Zed upgrade is blocked"
+          issue_number=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          body="$CHECK_NAME finished with $CONCLUSION on the rolling upgrade PR.\n\nRun: $RUN_URL"
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
+
+  resolve-blocker:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close resolved blocker issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Automated Zed upgrade is blocked"
+          issue_number=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          if [[ -n "$issue_number" ]]; then
+            gh issue close "$issue_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --reason completed \
+              --comment "Resolved by the upstream pin merged in $GITHUB_SHA."
+          fi

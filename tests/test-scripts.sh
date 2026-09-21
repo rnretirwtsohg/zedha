@@ -411,6 +411,10 @@ test_release_metadata_uses_upstream_pin_and_revision() {
 test_macos_workflow_publishes_pin_updates() {
   local workflow="$repo_root/.github/workflows/build-macos.yml"
   assert_file_contains "$workflow" "paths: [upstream/stable.json]"
+  assert_file_contains "$workflow" "pull_request:"
+  assert_file_contains "$workflow" "name: Build Zedha DMG"
+  assert_file_contains "$workflow" "name: Publish Zedha release"
+  assert_file_contains "$workflow" "actions/download-artifact@v4"
   assert_file_contains "$workflow" "bash ./scripts/release-metadata"
   assert_file_contains "$workflow" "gh release create"
   assert_file_contains "$workflow" "gh release upload"
@@ -564,6 +568,23 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "git add upstream/stable.json flake.lock"
   assert_file_contains "$workflow" "gh pr list"
   assert_file_contains "$workflow" "gh pr create"
+  assert_file_contains "$workflow" "branch=automation/upgrade-zed-latest"
+  assert_file_contains "$workflow" "force-with-lease"
+  assert_file_contains "$workflow" "Automated Zed upgrade is blocked"
+}
+
+test_upgrade_status_workflow_reports_failed_gates() {
+  local workflow="$repo_root/.github/workflows/upgrade-status.yml"
+  assert_file_contains "$workflow" "workflow_run:"
+  assert_file_contains "$workflow" "Build Linux Package"
+  assert_file_contains "$workflow" "Build macOS Artifact"
+  assert_file_contains "$workflow" "automation/upgrade-zed-latest"
+  assert_file_contains "$workflow" "Build Zedha package"
+  assert_file_contains "$workflow" "Build Zedha DMG"
+  assert_file_contains "$workflow" "gh pr merge"
+  assert_file_contains "$workflow" "squash"
+  assert_file_contains "$workflow" "gh issue create"
+  assert_file_contains "$workflow" "gh issue close"
 }
 
 test_linux_workflow_builds_and_caches_zedha() {
@@ -621,6 +642,7 @@ test_update_upstream_pin_peels_annotated_tags
 test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
 test_upgrade_workflow_wires_detection_validation_and_pr_creation
+test_upgrade_status_workflow_reports_failed_gates
 test_linux_workflow_builds_and_caches_zedha
 test_readme_documents_native_nix_install
 
