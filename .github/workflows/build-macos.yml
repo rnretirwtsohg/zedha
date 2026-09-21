@@ -1,6 +1,12 @@
 name: Build macOS Artifact
 
 on:
+  pull_request:
+    paths:
+      - upstream/stable.json
+      - patches/**
+      - scripts/**
+      - .github/workflows/build-macos.yml
   push:
     branches: [main]
     paths: [upstream/stable.json]
@@ -35,11 +41,12 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     name: Build Zedha DMG
+    if: github.repository == 'rnretirwtsohg/zedha'
     # Blacksmith macOS is Apple Silicon only. Keep GitHub-hosted Intel for x86_64.
     runs-on: ${{ inputs.target == 'x86_64-apple-darwin' && 'macos-15-intel' || 'blacksmith-12vcpu-macos-15' }}
     env:
@@ -88,12 +95,25 @@ jobs:
           name: Zedha-${{ env.TARGET }}
           path: artifacts/*.dmg
           if-no-files-found: error
+
+  publish:
+    name: Publish Zedha release
+    needs: build
+    if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish && inputs.target == 'aarch64-apple-darwin') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Zedha DMG
+        uses: actions/download-artifact@v4
+        with:
+          name: Zedha-aarch64-apple-darwin
+          path: artifacts
       - name: Prepare release metadata
         id: release
-        if: ${{ (github.event_name == 'push' || inputs.publish) && env.TARGET == 'aarch64-apple-darwin' }}
         run: bash ./scripts/release-metadata upstream/stable.json '${{ inputs.release_revision || '1' }}' >> "$GITHUB_OUTPUT"
       - name: Publish GitHub Release
-        if: ${{ (github.event_name == 'push' || inputs.publish) && env.TARGET == 'aarch64-apple-darwin' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
@@ -103,7 +123,7 @@ jobs:
         run: |
           dmg=artifacts/Zedha-aarch64.dmg
           checksum="artifacts/${RELEASE_TAG#v}-SHA256SUMS"
-          shasum -a 256 "$dmg" | sed 's#  artifacts/#  #' > "$checksum"
+          sha256sum "$dmg" | sed 's#  artifacts/#  #' > "$checksum"
 
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           Zedha build based on upstream Zed **$UPSTREAM_TAG** (\`$UPSTREAM_COMMIT\`).

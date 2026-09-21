@@ -190,10 +190,12 @@ Current patches:
 
 A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags,
 updates both `upstream/stable.json` and the official Zed revision in
-`flake.lock`, validates that the existing patches still apply, and opens a
-manual-review pull request. Nothing is auto-merged. Merging the pull request
-builds and publishes the Apple Silicon DMG; the Homebrew tap checks for new
-releases hourly and updates its cask.
+`flake.lock`, and refreshes one rolling upgrade pull request. GitHub merges it
+automatically only after the launcher tests, Linux package, identity checks,
+and a complete macOS DMG build pass. Failed patch or build gates leave `main`
+untouched and open or update one blocker issue. A successful merge publishes
+the Apple Silicon DMG; the Homebrew tap checks for new releases hourly and
+updates its cask.
 
 ## Troubleshooting
 
