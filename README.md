@@ -11,7 +11,7 @@ ordered patch set, and packages the result.
 
 | | |
 |---|---|
-| Upstream pin | Zed **v1.20.2** (`7c451e694f3c52ee0aeb01d7e28b5fa18cd0ad2f`) |
+| Upstream pin | `upstream/stable.json` (verified against `flake.lock`) |
 | Published builds | Native Nix package for x86_64 Linux; **unsigned and not notarized** Apple Silicon DMGs |
 | Updates | Homebrew-managed on macOS; no in-app update feed |
 | Intel Macs | No published DMG yet |
@@ -33,12 +33,17 @@ nix build github:rnretirwtsohg/zedha#zedha --accept-flake-config
 ./result/bin/zedha
 ```
 
-For declarative installation, add Zedha as an independent flake input and use
-its package for the host system:
+For declarative installation, have Zedha follow the host's Nixpkgs input and
+use its package for the host system. Zedha also makes upstream Zed's Nix
+package follow this input, so the editor and the dynamically loaded system
+graphics driver use a compatible runtime:
 
 ```nix
 {
-  inputs.zedha.url = "github:rnretirwtsohg/zedha";
+  inputs.zedha = {
+    url = "github:rnretirwtsohg/zedha";
+    inputs.nixpkgs.follows = "nixpkgs";
+  };
 
   # In a NixOS or Home Manager module with inputs and pkgs in scope:
   home.packages = [ inputs.zedha.packages.${pkgs.system}.zedha ];

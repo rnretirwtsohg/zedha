@@ -1,17 +1,62 @@
-{ lib, stable, zedPackage }:
+{ lib, stable, zedPackage, cargo-about, livekit-libwebrtc }:
 let
   replaceRequired = from: to: text:
     assert lib.assertMsg (lib.hasInfix from text)
       "official Zed Nix hook no longer contains ${from}";
     builtins.replaceStrings [ from ] [ to ] text;
+  # Zed pins cargo-about 0.8.2 in its build inputs. Newer Nixpkgs adds a
+  # "cli" feature to cargo-about, which that older release does not have.
+  # Override the package argument before Zed constructs its Cargo dependency
+  # derivation, not just the final editor derivation. Cargo's build and check
+  # feature lists are already materialized when overrideAttrs runs.
+  hasOldCargoAbout = lib.any (
+    input: (input.pname or "") == "cargo-about" && (input.version or "") == "0.8.2"
+  ) zedPackage.nativeBuildInputs;
+  compatibleZed =
+    if hasOldCargoAbout then
+      zedPackage.override {
+        cargo-about = cargo-about.overrideAttrs {
+          buildFeatures = [ ];
+          cargoBuildFeatures = [ ];
+          cargoCheckFeatures = [ ];
+        };
+      }
+    else
+      zedPackage;
+  # This older WebRTC 137 package predates the PipeWire header fix carried by
+  # Nixpkgs' WebRTC 137 package. Both Crane stages need the same replacement.
+  upstreamWebRTC = compatibleZed.passthru.commonArgs.env.LK_CUSTOM_WEBRTC;
+  useNixpkgsWebRTC = upstreamWebRTC.version == "137-unstable-2025-11-24";
+  webRTC =
+    if useNixpkgsWebRTC then
+      assert lib.assertMsg (lib.hasPrefix "137-" livekit-libwebrtc.version)
+        "Nixpkgs WebRTC ${livekit-libwebrtc.version} does not match Zed's WebRTC 137 pin";
+      livekit-libwebrtc
+    else
+      upstreamWebRTC;
+  cargoArtifacts =
+    if useNixpkgsWebRTC then
+      compatibleZed.passthru.cargoArtifacts.overrideAttrs (old: {
+        env = old.env // { LK_CUSTOM_WEBRTC = webRTC; };
+      })
+    else
+      compatibleZed.passthru.cargoArtifacts;
 in
-zedPackage.overrideAttrs (old: rec {
+compatibleZed.overrideAttrs (old: rec {
   pname = "zedha";
   version = "${lib.removePrefix "v" stable.tag}-zedha";
   __intentionallyOverridingVersion = true;
   env = old.env // {
     RELEASE_VERSION = version;
     ZED_COMMIT_SHA = stable.commit;
+    LK_CUSTOM_WEBRTC = webRTC;
+  };
+  inherit cargoArtifacts;
+  passthru = old.passthru // {
+    inherit cargoArtifacts;
+    commonArgs = old.passthru.commonArgs // {
+      env = old.passthru.commonArgs.env // { LK_CUSTOM_WEBRTC = webRTC; };
+    };
   };
   patches = (old.patches or [ ]) ++ [
     ../patches/0001-terminal-launcher.patch
