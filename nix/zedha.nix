@@ -1,11 +1,30 @@
-{ lib, stable, zedPackage }:
+{ lib, stable, zedPackage, cargo-about }:
 let
   replaceRequired = from: to: text:
     assert lib.assertMsg (lib.hasInfix from text)
       "official Zed Nix hook no longer contains ${from}";
     builtins.replaceStrings [ from ] [ to ] text;
+  # Zed pins cargo-about 0.8.2 in its build inputs. Newer Nixpkgs adds a
+  # "cli" feature to cargo-about, which that older release does not have.
+  # Override the package argument before Zed constructs its Cargo dependency
+  # derivation, not just the final editor derivation. Cargo's build and check
+  # feature lists are already materialized when overrideAttrs runs.
+  hasOldCargoAbout = lib.any (
+    input: (input.pname or "") == "cargo-about" && (input.version or "") == "0.8.2"
+  ) zedPackage.nativeBuildInputs;
+  compatibleZed =
+    if hasOldCargoAbout then
+      zedPackage.override {
+        cargo-about = cargo-about.overrideAttrs {
+          buildFeatures = [ ];
+          cargoBuildFeatures = [ ];
+          cargoCheckFeatures = [ ];
+        };
+      }
+    else
+      zedPackage;
 in
-zedPackage.overrideAttrs (old: rec {
+compatibleZed.overrideAttrs (old: rec {
   pname = "zedha";
   version = "${lib.removePrefix "v" stable.tag}-zedha";
   __intentionallyOverridingVersion = true;
@@ -13,21 +32,6 @@ zedPackage.overrideAttrs (old: rec {
     RELEASE_VERSION = version;
     ZED_COMMIT_SHA = stable.commit;
   };
-  # Zed pins cargo-about 0.8.2. Newer Nixpkgs adds a "cli" build feature to
-  # cargo-about, which that older release does not have. Reset the derived
-  # Cargo feature lists too; overrideAttrs does not recalculate them. Leave
-  # newer versions alone once Zed drops its pin.
-  nativeBuildInputs = map (
-    input:
-    if (input.pname or "") == "cargo-about" && (input.version or "") == "0.8.2" then
-      input.overrideAttrs {
-        buildFeatures = [ ];
-        cargoBuildFeatures = [ ];
-        cargoCheckFeatures = [ ];
-      }
-    else
-      input
-  ) old.nativeBuildInputs;
   patches = (old.patches or [ ]) ++ [
     ../patches/0001-terminal-launcher.patch
     ../patches/0002-brand-as-zedha.patch
