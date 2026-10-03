@@ -58,9 +58,9 @@ JSON
 }
 
 write_nix_lock() {
-  local path=$1 commit=$2
+  local path=$1 commit=$2 zed_nixpkgs=${3:-'["nixpkgs"]'}
   cat > "$path" <<JSON
-{"nodes":{"root":{"inputs":{"zed":"zed"}},"zed":{"locked":{"rev":"$commit"}}},"root":"root","version":7}
+{"nodes":{"nixpkgs":{"locked":{"rev":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}},"root":{"inputs":{"nixpkgs":"nixpkgs","zed":"zed"}},"zed":{"inputs":{"nixpkgs":$zed_nixpkgs},"locked":{"rev":"$commit"}}},"root":"root","version":7}
 JSON
 }
 
@@ -82,6 +82,19 @@ test_check_nix_pin_rejects_mismatch() {
   fi
   assert_file_contains "$output" "stable.json=1111111111111111111111111111111111111111"
   assert_file_contains "$output" "flake.lock=2222222222222222222222222222222222222222"
+}
+
+test_check_nix_pin_rejects_separate_zed_nixpkgs() {
+  local commit=1111111111111111111111111111111111111111
+  local pin="$test_root/separate-nixpkgs-pin.json" lock="$test_root/separate-nixpkgs.lock" output="$test_root/separate-nixpkgs.out"
+  write_upstream_pin "$pin" v1.2.3 "$commit"
+  write_nix_lock "$lock" "$commit" '"upstream-nixpkgs"'
+
+  if "$repo_root/scripts/check-nix-pin" "$pin" "$lock" >"$output" 2>&1; then
+    echo "expected a separate Zed nixpkgs input to fail" >&2
+    exit 1
+  fi
+  assert_file_contains "$output" "Zed's nixpkgs must follow Zedha's nixpkgs"
 }
 
 test_sync_nix_pin_updates_only_zed() {
@@ -619,6 +632,7 @@ test_readme_documents_native_nix_install() {
 test_fetch_upstream_checks_out_pinned_commit
 test_check_nix_pin_accepts_match
 test_check_nix_pin_rejects_mismatch
+test_check_nix_pin_rejects_separate_zed_nixpkgs
 test_sync_nix_pin_updates_only_zed
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir

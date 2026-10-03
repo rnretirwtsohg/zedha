@@ -15,10 +15,16 @@ with open(pin_path, encoding="utf-8") as file:
 with open(lock_path, encoding="utf-8") as file:
     lock = json.load(file)
 root = lock["nodes"][lock["root"]]
+nixpkgs_node = root["inputs"].get("nixpkgs")
+if not isinstance(nixpkgs_node, str) or "locked" not in lock["nodes"].get(nixpkgs_node, {}):
+    raise SystemExit("Zedha must have its own locked nixpkgs input")
 node = root["inputs"]["zed"]
 if not isinstance(node, str):
     raise SystemExit("locked zed input is not a direct flake node")
-locked = lock["nodes"][node]["locked"]["rev"]
+zed = lock["nodes"][node]
+if zed.get("inputs", {}).get("nixpkgs") != ["nixpkgs"]:
+    raise SystemExit("Zed's nixpkgs must follow Zedha's nixpkgs")
+locked = zed["locked"]["rev"]
 if locked != pin["commit"]:
     raise SystemExit(f"Nix pin mismatch: stable.json={pin['commit']} flake.lock={locked}")
 print(f"Nix pin matches {locked}")

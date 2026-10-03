@@ -2,8 +2,11 @@
   description = "Zedha — a personal-first downstream distribution of Zed";
 
   inputs = {
-    zed.url = "github:zed-industries/zed";
-    nixpkgs.follows = "zed/nixpkgs";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    zed = {
+      url = "github:zed-industries/zed";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { nixpkgs, zed, ... }:
