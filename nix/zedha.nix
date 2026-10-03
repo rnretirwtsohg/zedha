@@ -14,12 +14,17 @@ zedPackage.overrideAttrs (old: rec {
     ZED_COMMIT_SHA = stable.commit;
   };
   # Zed pins cargo-about 0.8.2. Newer Nixpkgs adds a "cli" build feature to
-  # cargo-about, which that older release does not have. Leave newer versions
-  # alone once Zed drops its pin.
+  # cargo-about, which that older release does not have. Reset the derived
+  # Cargo feature lists too; overrideAttrs does not recalculate them. Leave
+  # newer versions alone once Zed drops its pin.
   nativeBuildInputs = map (
     input:
     if (input.pname or "") == "cargo-about" && (input.version or "") == "0.8.2" then
-      input.overrideAttrs { buildFeatures = [ ]; }
+      input.overrideAttrs {
+        buildFeatures = [ ];
+        cargoBuildFeatures = [ ];
+        cargoCheckFeatures = [ ];
+      }
     else
       input
   ) old.nativeBuildInputs;
