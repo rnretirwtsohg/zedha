@@ -1,4 +1,4 @@
-{ lib, stable, zedPackage, cargo-about }:
+{ lib, stable, zedPackage, cargo-about, livekit-libwebrtc }:
 let
   replaceRequired = from: to: text:
     assert lib.assertMsg (lib.hasInfix from text)
@@ -23,6 +23,24 @@ let
       }
     else
       zedPackage;
+  # This older WebRTC 137 package predates the PipeWire header fix carried by
+  # Nixpkgs' WebRTC 137 package. Both Crane stages need the same replacement.
+  upstreamWebRTC = compatibleZed.passthru.commonArgs.env.LK_CUSTOM_WEBRTC;
+  useNixpkgsWebRTC = upstreamWebRTC.version == "137-unstable-2025-11-24";
+  webRTC =
+    if useNixpkgsWebRTC then
+      assert lib.assertMsg (lib.hasPrefix "137-" livekit-libwebrtc.version)
+        "Nixpkgs WebRTC ${livekit-libwebrtc.version} does not match Zed's WebRTC 137 pin";
+      livekit-libwebrtc
+    else
+      upstreamWebRTC;
+  cargoArtifacts =
+    if useNixpkgsWebRTC then
+      compatibleZed.passthru.cargoArtifacts.overrideAttrs (old: {
+        env = old.env // { LK_CUSTOM_WEBRTC = webRTC; };
+      })
+    else
+      compatibleZed.passthru.cargoArtifacts;
 in
 compatibleZed.overrideAttrs (old: rec {
   pname = "zedha";
@@ -31,6 +49,14 @@ compatibleZed.overrideAttrs (old: rec {
   env = old.env // {
     RELEASE_VERSION = version;
     ZED_COMMIT_SHA = stable.commit;
+    LK_CUSTOM_WEBRTC = webRTC;
+  };
+  inherit cargoArtifacts;
+  passthru = old.passthru // {
+    inherit cargoArtifacts;
+    commonArgs = old.passthru.commonArgs // {
+      env = old.passthru.commonArgs.env // { LK_CUSTOM_WEBRTC = webRTC; };
+    };
   };
   patches = (old.patches or [ ]) ++ [
     ../patches/0001-terminal-launcher.patch
