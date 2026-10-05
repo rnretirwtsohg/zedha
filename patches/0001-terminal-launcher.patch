@@ -1,6 +1,6 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 0f90c966c16a9bb004dcce031ad68fa0a9780ce2 Mon Sep 17 00:00:00 2001
 From: Naresh <ghostwriternr@gmail.com>
-Date: Sun, 20 Sep 2026 22:42:47 +0100
+Date: Mon, 5 Oct 2026 10:04:50 +0100
 Subject: [PATCH] Add terminal launcher integration
 
 ---
@@ -15,14 +15,14 @@ Subject: [PATCH] Add terminal launcher integration
  crates/terminal_view/src/terminal_view.rs     |  331 +++-
  crates/workspace/src/workspace.rs             |   12 +
  crates/zed/src/zed.rs                         |    1 +
- 11 files changed, 2092 insertions(+), 79 deletions(-)
+ 11 files changed, 2093 insertions(+), 78 deletions(-)
  create mode 100644 crates/terminal_view/src/terminal_launcher.rs
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 75a6f1a..dacccbd 100644
+index aaf8740..5dc48e9 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -18223,6 +18223,7 @@ dependencies = [
+@@ -18344,6 +18344,7 @@ dependencies = [
   "language",
   "log",
   "menu",
@@ -30,7 +30,7 @@ index 75a6f1a..dacccbd 100644
   "pretty_assertions",
   "project",
   "regex",
-@@ -18237,11 +18238,13 @@ dependencies = [
+@@ -18358,11 +18359,13 @@ dependencies = [
   "shellexpand",
   "shlex 1.3.0",
   "task",
@@ -45,17 +45,14 @@ index 75a6f1a..dacccbd 100644
   "zed_actions",
  ]
 diff --git a/crates/agent_ui/src/agent_panel.rs b/crates/agent_ui/src/agent_panel.rs
-index 998c1fd..c3b707a 100644
+index 8a14624..ba3a3eb 100644
 --- a/crates/agent_ui/src/agent_panel.rs
 +++ b/crates/agent_ui/src/agent_panel.rs
-@@ -2075,14 +2075,17 @@ impl AgentPanel {
-     ) {
+@@ -2043,12 +2043,16 @@ impl AgentPanel {
+         self.pending_terminal_spawn = Some(terminal_id);
          let terminal_working_directory = working_directory.clone();
          let init_command = Self::terminal_init_command(run_init_command, cx);
--        let terminal_task = self.project.update(cx, |project, cx| {
--            project.create_terminal_shell(working_directory, cx)
--        });
-+        let terminal_project = self.project.clone();
+-        let terminal_task = self.create_terminal_shell(working_directory, cx);
          let workspace = self.workspace.clone();
          let workspace_id = self.workspace_id;
          let project = self.project.downgrade();
@@ -63,13 +60,30 @@ index 998c1fd..c3b707a 100644
          cx.spawn_in(window, async move |this, cx| {
 +            let terminal_control_env =
 +                terminal_view::terminal_control_env_for_workspace(&workspace, cx).await;
-+            let terminal_task = terminal_project.update(cx, |project, cx| {
-+                project.create_terminal_shell(working_directory, terminal_control_env, cx)
-+            });
++            let terminal_task = this.update(cx, |this, cx| {
++                this.create_terminal_shell(working_directory, terminal_control_env, cx)
++            })?;
              let terminal = match terminal_task.await {
                  Ok(terminal) => terminal,
                  Err(error) => {
-@@ -7752,6 +7755,7 @@ mod tests {
+@@ -2097,6 +2101,7 @@ impl AgentPanel {
+     fn create_terminal_shell(
+         &mut self,
+         working_directory: Option<PathBuf>,
++        extra_env: HashMap<String, String>,
+         cx: &mut Context<Self>,
+     ) -> Task<Result<Entity<terminal::Terminal>>> {
+         // A real shell ties the spawn's timing to the host, so a test that needs
+@@ -2111,7 +2116,7 @@ impl AgentPanel {
+         }
+ 
+         self.project.update(cx, |project, cx| {
+-            project.create_terminal_shell(working_directory, cx)
++            project.create_terminal_shell(working_directory, extra_env, cx)
+         })
+     }
+ 
+@@ -7772,6 +7777,7 @@ mod tests {
          let (panel, mut cx) = setup_panel(cx).await;
          cx.executor().allow_parking();
          cx.update(|_, cx| {
@@ -77,7 +91,7 @@ index 998c1fd..c3b707a 100644
              let mut settings = AgentSettings::get_global(cx).clone();
              // `init_ran_42` is the command's output, not its echoed text, so finding
              // it proves the shell executed the command rather than just echoing it.
-@@ -7763,6 +7767,13 @@ mod tests {
+@@ -7783,6 +7789,13 @@ mod tests {
              terminal_settings.shell = task::Shell::Program("/bin/sh".to_string());
              TerminalSettings::override_global(terminal_settings, cx);
          });
@@ -91,7 +105,7 @@ index 998c1fd..c3b707a 100644
  
          let terminal_id = TerminalId::new();
          panel.update_in(&mut cx, |panel, window, cx| {
-@@ -9396,6 +9407,79 @@ mod tests {
+@@ -9414,6 +9427,79 @@ mod tests {
          (panel, cx)
      }
  
@@ -285,10 +299,10 @@ index 2d8a37c..cf45d49 100644
          SpawnInTerminal {
              command: Some("cmd.exe".to_string()),
 diff --git a/crates/terminal/src/terminal.rs b/crates/terminal/src/terminal.rs
-index 37c32e9..50f85ef 100644
+index 6bbd5fa..f27d21d 100644
 --- a/crates/terminal/src/terminal.rs
 +++ b/crates/terminal/src/terminal.rs
-@@ -3184,13 +3184,20 @@ impl Terminal {
+@@ -3212,13 +3212,20 @@ impl Terminal {
          self.vi_mode_enabled
      }
  
@@ -338,7 +352,7 @@ index 53ac2eb..96d7787 100644
  zed_actions.workspace = true
  
 diff --git a/crates/terminal_view/src/persistence.rs b/crates/terminal_view/src/persistence.rs
-index 3dfa5bb..f935ffc 100644
+index 3dfa5bb..8ee955a 100644
 --- a/crates/terminal_view/src/persistence.rs
 +++ b/crates/terminal_view/src/persistence.rs
 @@ -1,6 +1,6 @@
@@ -364,9 +378,9 @@ index 3dfa5bb..f935ffc 100644
      window.spawn(cx, async move |cx| {
          let restored_items = match &serialized_panel.items {
              SerializedItems::NoSplits(item_ids) => {
-+                let extra_env =
-+                    terminal_panel.read_with(cx, |panel, _| panel.terminal_control_env())
-+                        .unwrap_or_default();
++                let extra_env = terminal_panel
++                    .read_with(cx, |panel, _| panel.terminal_control_env())
++                    .unwrap_or_default();
                  let items = deserialize_terminal_views(
                      database_id,
                      project,
@@ -2204,7 +2218,7 @@ index 9d0eb37..2d44e78 100644
                  })
              })
 diff --git a/crates/terminal_view/src/terminal_view.rs b/crates/terminal_view/src/terminal_view.rs
-index 5f711f2..b6bde8f 100644
+index 7651034..07ac01d 100644
 --- a/crates/terminal_view/src/terminal_view.rs
 +++ b/crates/terminal_view/src/terminal_view.rs
 @@ -1,13 +1,16 @@
@@ -2224,7 +2238,7 @@ index 5f711f2..b6bde8f 100644
  use gpui::{
      Action, AnyElement, App, ClipboardEntry, DismissEvent, Entity, EventEmitter, ExternalPaths,
      FocusHandle, Focusable, Font, KeyContext, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-@@ -105,6 +108,7 @@ actions!(
+@@ -106,6 +109,7 @@ actions!(
  pub struct RenameTerminal;
  
  pub fn init(cx: &mut App) {
@@ -2232,7 +2246,7 @@ index 5f711f2..b6bde8f 100644
      terminal_panel::init(cx);
  
      register_serializable_item::<TerminalView>(cx);
-@@ -220,11 +224,15 @@ impl TerminalView {
+@@ -222,11 +226,15 @@ impl TerminalView {
      ) {
          let local = action.local;
          let working_directory = default_working_directory(workspace, cx);
@@ -2250,7 +2264,7 @@ index 5f711f2..b6bde8f 100644
              }
          })
          .detach_and_log_err(cx);
-@@ -1759,11 +1767,17 @@ impl Item for TerminalView {
+@@ -1822,11 +1830,17 @@ impl Item for TerminalView {
          window: &mut Window,
          cx: &mut Context<Self>,
      ) -> Task<Option<Entity<Self>>> {
@@ -2269,7 +2283,7 @@ index 5f711f2..b6bde8f 100644
          }) else {
              return Task::ready(None);
          };
-@@ -1913,57 +1927,172 @@ impl SerializableItem for TerminalView {
+@@ -1976,57 +1990,172 @@ impl SerializableItem for TerminalView {
          window: &mut Window,
          cx: &mut App,
      ) -> Task<anyhow::Result<Entity<Self>>> {
@@ -2487,7 +2501,7 @@ index 5f711f2..b6bde8f 100644
  impl SearchableItem for TerminalView {
      type Match = Range;
  
-@@ -2960,6 +3089,88 @@ mod tests {
+@@ -3182,6 +3311,88 @@ mod tests {
              .unwrap();
      }
  
@@ -2576,7 +2590,7 @@ index 5f711f2..b6bde8f 100644
      // Terminal rename tests
  
      #[gpui::test]
-@@ -2969,7 +3180,9 @@ mod tests {
+@@ -3191,7 +3402,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2587,7 +2601,7 @@ index 5f711f2..b6bde8f 100644
              .await
              .unwrap();
  
-@@ -2999,7 +3212,9 @@ mod tests {
+@@ -3221,7 +3434,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2598,7 +2612,7 @@ index 5f711f2..b6bde8f 100644
              .await
              .unwrap();
  
-@@ -3030,7 +3245,9 @@ mod tests {
+@@ -3252,7 +3467,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2609,7 +2623,7 @@ index 5f711f2..b6bde8f 100644
              .await
              .unwrap();
  
-@@ -3067,7 +3284,9 @@ mod tests {
+@@ -3289,7 +3506,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2620,7 +2634,7 @@ index 5f711f2..b6bde8f 100644
              .await
              .unwrap();
  
-@@ -3099,7 +3318,9 @@ mod tests {
+@@ -3321,7 +3540,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2631,7 +2645,7 @@ index 5f711f2..b6bde8f 100644
              .await
              .unwrap();
  
-@@ -3309,7 +3530,9 @@ mod tests {
+@@ -3531,7 +3752,9 @@ mod tests {
          let (project, workspace) = init_test(cx).await;
  
          let terminal = project
@@ -2643,10 +2657,10 @@ index 5f711f2..b6bde8f 100644
              .unwrap();
  
 diff --git a/crates/workspace/src/workspace.rs b/crates/workspace/src/workspace.rs
-index 70cf387..920e411 100644
+index 2c61376..2abc395 100644
 --- a/crates/workspace/src/workspace.rs
 +++ b/crates/workspace/src/workspace.rs
-@@ -1520,6 +1520,7 @@ pub enum Event {
+@@ -1521,6 +1521,7 @@ pub enum Event {
      ModalOpened,
      Activate,
      PanelAdded(AnyView),
@@ -2654,7 +2668,7 @@ index 70cf387..920e411 100644
      WorktreeCreationChanged,
  }
  
-@@ -1641,6 +1642,7 @@ pub struct Workspace {
+@@ -1640,6 +1641,7 @@ pub struct Workspace {
      open_in_dev_container: bool,
      _dev_container_task: Option<Task<Result<()>>>,
      _panels_task: Option<Task<Result<()>>>,
@@ -2662,7 +2676,7 @@ index 70cf387..920e411 100644
      sidebar_focus_handle: Option<FocusHandle>,
      multi_workspace: Option<WeakEntity<MultiWorkspace>>,
      /// Shared with the parent `MultiWorkspace` and any sibling workspaces: holds
-@@ -2111,6 +2113,7 @@ impl Workspace {
+@@ -2110,6 +2112,7 @@ impl Workspace {
              bottom_dock,
              right_dock,
              _panels_task: None,
@@ -2670,7 +2684,7 @@ index 70cf387..920e411 100644
              project: project.clone(),
              follower_states: Default::default(),
              last_leaders_by_pane: Default::default(),
-@@ -2924,6 +2927,15 @@ impl Workspace {
+@@ -2923,6 +2926,15 @@ impl Workspace {
          self._panels_task.take()
      }
  
@@ -2687,10 +2701,10 @@ index 70cf387..920e411 100644
          &self.app_state.user_store
      }
 diff --git a/crates/zed/src/zed.rs b/crates/zed/src/zed.rs
-index 2bce5d0..ed1ed3a 100644
+index 4034efd..fb6a902 100644
 --- a/crates/zed/src/zed.rs
 +++ b/crates/zed/src/zed.rs
-@@ -810,6 +810,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
+@@ -811,6 +811,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
  
          workspace_handle.update(cx, |workspace, cx| {
              workspace.finish_dock_restoration(cx);
@@ -2698,3 +2712,6 @@ index 2bce5d0..ed1ed3a 100644
          })?;
  
          anyhow::Ok(())
+-- 
+2.55.0
+
