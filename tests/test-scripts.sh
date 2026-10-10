@@ -584,6 +584,8 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "branch=automation/upgrade-zed-latest"
   assert_file_contains "$workflow" "force-with-lease"
   assert_file_contains "$workflow" "Automated Zed upgrade is blocked"
+  assert_file_contains "$workflow" "issues: write"
+  assert_file_contains "$workflow" 'GH_TOKEN: ${{ github.token }}'
 }
 
 test_upgrade_status_workflow_reports_failed_gates() {

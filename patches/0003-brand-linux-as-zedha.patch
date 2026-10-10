@@ -1,23 +1,28 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 28e1fd91da5f1e281a34f8d2ebd218d7021d948b Mon Sep 17 00:00:00 2001
 From: Naresh <ghostwriternr@gmail.com>
-Date: Sun, 20 Sep 2026 22:42:54 +0100
-Subject: [PATCH] Brand Linux package as Zedha
+Date: Mon, 5 Oct 2026 10:10:31 +0100
+Subject: [PATCH] Brand Linux distribution as Zedha
 
 ---
- crates/cli/src/main.rs              | 2 +-
+ crates/cli/src/main.rs              | 7 +++++--
  crates/zed/resources/zed.desktop.in | 4 ++--
- 2 files changed, 3 insertions(+), 3 deletions(-)
+ 2 files changed, 7 insertions(+), 4 deletions(-)
 
 diff --git a/crates/cli/src/main.rs b/crates/cli/src/main.rs
-index 7676d52..aa2eaf7 100644
+index 7676d52..cb3ec6d 100644
 --- a/crates/cli/src/main.rs
 +++ b/crates/cli/src/main.rs
-@@ -909,7 +909,7 @@ mod linux {
+@@ -908,8 +908,11 @@ mod linux {
+ 
                  // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
                  // ./zed is for the target directory in development builds.
-                 let possible_locations =
+-                let possible_locations =
 -                    ["../libexec/zed-editor", "../lib/zed/zed-editor", "./zed"];
-+                    ["../libexec/zedha-editor", "../lib/zedha/zedha-editor", "./zedha"];
++                let possible_locations = [
++                    "../libexec/zedha-editor",
++                    "../lib/zedha/zedha-editor",
++                    "./zedha",
++                ];
                  possible_locations
                      .iter()
                      .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -39,3 +44,6 @@ index eaace15..04efa57 100644
  Actions=NewWorkspace;
  
  [Desktop Action NewWorkspace]
+-- 
+2.55.0
+

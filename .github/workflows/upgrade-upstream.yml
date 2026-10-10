@@ -11,6 +11,7 @@ concurrency:
 
 permissions:
   contents: read
+  issues: write
 
 jobs:
   upgrade:
@@ -131,7 +132,7 @@ jobs:
       - name: Report blocked upgrade
         if: failure() && steps.candidate.outputs.upgrade == 'true'
         env:
-          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
