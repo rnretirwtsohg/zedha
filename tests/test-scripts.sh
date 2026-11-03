@@ -664,8 +664,6 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "./scripts/apply-patches"
   assert_file_contains "$workflow" "./scripts/check-identity"
   assert_file_contains "$workflow" "./scripts/sync-nix-pin"
-  assert_file_contains "$workflow" "./scripts/update-nixpkgs"
-  assert_file_contains "$workflow" "Advance Zedha's Nixpkgs"
   assert_file_contains "$workflow" "git add upstream/stable.json flake.lock"
   assert_file_contains "$workflow" "gh pr list"
   assert_file_contains "$workflow" "gh pr create"
@@ -676,12 +674,32 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" 'GH_TOKEN: ${{ github.token }}'
 }
 
+test_advance_nixpkgs_workflow_opens_its_own_pr() {
+  local workflow="$repo_root/.github/workflows/advance-nixpkgs.yml"
+  assert_file_contains "$workflow" "schedule:"
+  assert_file_contains "$workflow" "workflow_dispatch:"
+  assert_file_contains "$workflow" "./scripts/update-nixpkgs"
+  assert_file_contains "$workflow" "./scripts/check-nix-pin"
+  assert_file_contains "$workflow" "branch=automation/advance-nixpkgs"
+  assert_file_contains "$workflow" "git add flake.lock"
+  assert_file_contains "$workflow" "force-with-lease"
+  assert_file_contains "$workflow" "gh pr create"
+  assert_file_contains "$workflow" "Automated Nixpkgs advance is blocked"
+  if grep -Fq "update-nixpkgs" "$repo_root/.github/workflows/upgrade-upstream.yml"; then
+    echo "expected Nixpkgs advances to stay independent of blocked Zed upgrades" >&2
+    exit 1
+  fi
+}
+
 test_upgrade_status_workflow_reports_failed_gates() {
   local workflow="$repo_root/.github/workflows/upgrade-status.yml"
   assert_file_contains "$workflow" "workflow_run:"
   assert_file_contains "$workflow" "Build Linux Package"
   assert_file_contains "$workflow" "Build macOS Artifact"
   assert_file_contains "$workflow" "automation/upgrade-zed-latest"
+  assert_file_contains "$workflow" "automation/advance-nixpkgs"
+  assert_file_contains "$workflow" 'HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}'
+  assert_file_contains "$workflow" "Automated Nixpkgs advance is blocked"
   assert_file_contains "$workflow" "Build Zedha package"
   assert_file_contains "$workflow" "Build Zedha DMG"
   assert_file_contains "$workflow" 'any(.path == "upstream/stable.json")'
@@ -752,6 +770,7 @@ test_update_upstream_pin_peels_annotated_tags
 test_update_upstream_pin_rejects_invalid_pin
 test_update_upstream_pin_refuses_downgrade
 test_upgrade_workflow_wires_detection_validation_and_pr_creation
+test_advance_nixpkgs_workflow_opens_its_own_pr
 test_upgrade_status_workflow_reports_failed_gates
 test_linux_workflow_builds_and_caches_zedha
 test_readme_documents_native_nix_install

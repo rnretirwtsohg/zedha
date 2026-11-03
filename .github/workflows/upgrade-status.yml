@@ -19,23 +19,28 @@ concurrency:
   group: upgrade-status-${{ github.event.workflow_run.head_sha || github.sha }}
   cancel-in-progress: false
 
+# Two rolling upgrade branches share these gates: Zed stable upgrades on
+# automation/upgrade-zed-latest and Nixpkgs advances on
+# automation/advance-nixpkgs. Each has its own blocker issue so a blocked Zed
+# upgrade never holds back Nixpkgs.
 jobs:
   merge-upgrade:
     if: >-
       github.event_name == 'workflow_run' &&
-      github.event.workflow_run.head_branch == 'automation/upgrade-zed-latest' &&
+      contains(fromJSON('["automation/upgrade-zed-latest", "automation/advance-nixpkgs"]'), github.event.workflow_run.head_branch) &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Merge after every gate passes
         env:
           GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           pr=$(gh pr list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
-            --head automation/upgrade-zed-latest \
+            --head "$HEAD_BRANCH" \
             --json number,headRefOid \
             --jq '.[0] // empty')
           if [[ -z "$pr" || "$(jq -r .headRefOid <<< "$pr")" != "$HEAD_SHA" ]]; then
@@ -51,8 +56,8 @@ jobs:
           Test|Apply patches
           Test|Targeted Zedha tests
           Build Linux Package|Build Zedha package'
-          # The DMG builds only when the Zed pin moves; a Nixpkgs-only
-          # upgrade never triggers it.
+          # The DMG builds only when the Zed pin moves; a Nixpkgs advance
+          # never triggers it.
           if jq -e '.files | any(.path == "upstream/stable.json")' <<< "$view" > /dev/null; then
             gates+=$'\nBuild macOS Artifact|Build Zedha DMG'
           fi
@@ -80,18 +85,23 @@ jobs:
   report-failure:
     if: >-
       github.event_name == 'workflow_run' &&
-      github.event.workflow_run.head_branch == 'automation/upgrade-zed-latest' &&
+      contains(fromJSON('["automation/upgrade-zed-latest", "automation/advance-nixpkgs"]'), github.event.workflow_run.head_branch) &&
       github.event.workflow_run.conclusion != 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Open or update blocker issue
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           CHECK_NAME: ${{ github.event.workflow_run.name }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           RUN_URL: ${{ github.event.workflow_run.html_url }}
         run: |
-          title="Automated Zed upgrade is blocked"
+          if [[ "$HEAD_BRANCH" == automation/advance-nixpkgs ]]; then
+            title="Automated Nixpkgs advance is blocked"
+          else
+            title="Automated Zed upgrade is blocked"
+          fi
           issue_number=$(gh issue list \
             --repo "$GITHUB_REPOSITORY" \
             --state open \
@@ -109,20 +119,36 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Close resolved blocker issue
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Close resolved blocker issues
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title="Automated Zed upgrade is blocked"
-          issue_number=$(gh issue list \
-            --repo "$GITHUB_REPOSITORY" \
-            --state open \
-            --limit 100 \
-            --json number,title \
-            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
-          if [[ -n "$issue_number" ]]; then
-            gh issue close "$issue_number" \
-              --repo "$GITHUB_REPOSITORY" \
-              --reason completed \
-              --comment "Resolved by the upgrade merged in $GITHUB_SHA."
+          titles=()
+          if ! git diff --quiet HEAD^ HEAD -- upstream/stable.json; then
+            titles+=("Automated Zed upgrade is blocked")
           fi
+          nixpkgs_rev() {
+            git show "$1:flake.lock" | jq -r '.nodes[.root].inputs.nixpkgs as $node
+              | if ($node | type) == "string" then .nodes[$node].locked.rev else "follows" end'
+          }
+          if [[ "$(nixpkgs_rev HEAD^)" != "$(nixpkgs_rev HEAD)" ]]; then
+            titles+=("Automated Nixpkgs advance is blocked")
+          fi
+          for title in "${titles[@]}"; do
+            issue_number=$(gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --limit 100 \
+              --json number,title \
+              --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+            if [[ -n "$issue_number" ]]; then
+              gh issue close "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --reason completed \
+                --comment "Resolved by the upgrade merged in $GITHUB_SHA."
+            fi
+          done

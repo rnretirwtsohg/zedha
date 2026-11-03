@@ -186,7 +186,8 @@ nix/zedha-cachix-public-key       public binary-cache signing key
 tests/test-scripts.sh             script behavior tests
 .github/workflows/build-linux.yml build and publish the Linux package
 .github/workflows/build-macos.yml build and publish the macOS release
-.github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables and Nixpkgs
+.github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables
+.github/workflows/advance-nixpkgs.yml   opens Nixpkgs advance PRs
 ```
 
 Current patches:
@@ -197,17 +198,20 @@ Current patches:
 0003-brand-linux-as-zedha.patch Linux CLI and desktop identity
 ```
 
-A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags and
-for Nixpkgs runtime drift. It updates `upstream/stable.json` and the official
-Zed revision in `flake.lock` for a new stable, advances the Nixpkgs revision in
-`flake.lock` when `scripts/update-nixpkgs` finds a newer glibc or libstdc++ or
-a lock older than 14 days, and refreshes one rolling upgrade pull request.
-GitHub merges it automatically only after the launcher tests, Linux package,
-and identity checks pass, plus a complete macOS DMG build when the Zed pin
-changes. Failed patch or build gates leave `main`
+A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags,
+updates both `upstream/stable.json` and the official Zed revision in
+`flake.lock`, and refreshes one rolling upgrade pull request. GitHub merges it
+automatically only after the launcher tests, Linux package, identity checks,
+and a complete macOS DMG build pass. Failed patch or build gates leave `main`
 untouched and open or update one blocker issue. A successful merge publishes
 the Apple Silicon DMG; the Homebrew tap checks for new releases hourly and
 updates its cask.
+
+A second scheduled workflow runs `scripts/update-nixpkgs` and refreshes its own
+rolling pull request when `nixpkgs-unstable` carries a newer glibc or libstdc++
+or the locked revision is older than 14 days. It merges after the launcher
+tests and Linux package pass, and has its own blocker issue, so a blocked Zed
+upgrade does not hold Nixpkgs back.
 
 ## Troubleshooting
 
