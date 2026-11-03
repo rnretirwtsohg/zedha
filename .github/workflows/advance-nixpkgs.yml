@@ -1,0 +1,115 @@
+name: Advance Nixpkgs
+
+on:
+  schedule:
+    - cron: "47 14 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: advance-nixpkgs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  advance:
+    name: Propose Nixpkgs advance
+    if: github.repository == 'rnretirwtsohg/zedha'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          token: ${{ secrets.UPGRADE_PR_TOKEN }}
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v17
+
+      - name: Detect Nixpkgs runtime drift
+        id: candidate
+        run: |
+          summary=$(./scripts/update-nixpkgs | tail -n 1)
+          echo "$summary"
+          if git diff --quiet -- flake.lock; then
+            echo "advance=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ./scripts/check-nix-pin
+          {
+            echo "advance=true"
+            echo "summary=$summary"
+            echo "branch=automation/advance-nixpkgs"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push rolling advance branch
+        if: steps.candidate.outputs.advance == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+        run: |
+          git config user.name "Zedha Upgrade Bot"
+          git config user.email "zedha-upgrade-bot@users.noreply.github.com"
+          git fetch --no-tags origin "$BRANCH" || true
+          git switch -C "$BRANCH"
+          git add flake.lock
+          git commit -m "Advance Zedha's Nixpkgs"
+          gh auth setup-git
+          git push --set-upstream --force-with-lease origin "$BRANCH"
+
+      - name: Open or refresh advance pull request
+        if: steps.candidate.outputs.advance == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
+          BRANCH: ${{ steps.candidate.outputs.branch }}
+          SUMMARY: ${{ steps.candidate.outputs.summary }}
+        run: |
+          cat > "$RUNNER_TEMP/advance-pr-body.md" <<EOF
+          $SUMMARY.
+
+          zedha.cachix.org serves builds against this lock, and hosts load
+          their graphics driver into Zedha, so its glibc and libstdc++ must
+          not fall behind theirs. GitHub will merge this pull request
+          automatically after the launcher tests and Linux package pass.
+          EOF
+
+          pr_number=$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --head "$BRANCH" \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -z "$pr_number" ]]; then
+            gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base main \
+              --head "$BRANCH" \
+              --title "Advance Zedha's Nixpkgs" \
+              --body-file "$RUNNER_TEMP/advance-pr-body.md"
+          else
+            gh pr edit "$pr_number" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file "$RUNNER_TEMP/advance-pr-body.md"
+          fi
+
+      - name: Report blocked advance
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Automated Nixpkgs advance is blocked"
+          issue_number=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --limit 100 \
+            --json number,title \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
+          body="The scheduled Nixpkgs advance failed before opening its pull request.\n\nRun: $RUN_URL"
+          if [[ -n "$issue_number" ]]; then
+            gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
