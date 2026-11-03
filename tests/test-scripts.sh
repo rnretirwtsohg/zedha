@@ -124,6 +124,92 @@ SH
   "$repo_root/scripts/check-nix-pin" "$pin" "$flake_dir/flake.lock"
 }
 
+create_fake_nixpkgs_nix() {
+  local fake_bin=$1
+  mkdir -p "$fake_bin"
+  cat > "$fake_bin/nix" <<'SH'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "flake update")
+    python3 - "$ZEDHA_FAKE_LOCK" "$ZEDHA_FAKE_NEW_REV" <<'PY'
+import json, sys
+path, rev = sys.argv[1:]
+with open(path, encoding="utf-8") as file: lock = json.load(file)
+lock["nodes"]["nixpkgs"]["locked"].update(rev=rev, lastModified=1800000000)
+with open(path, "w", encoding="utf-8") as file: json.dump(lock, file)
+PY
+    ;;
+  "eval --json")
+    case "$3" in
+      *"$ZEDHA_FAKE_NEW_REV"*) printf '%s\n' "$ZEDHA_FAKE_NEW_RUNTIME" ;;
+      *) printf '%s\n' "$ZEDHA_FAKE_OLD_RUNTIME" ;;
+    esac
+    ;;
+  *) echo "unexpected nix $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$fake_bin/nix"
+}
+
+# Runs update-nixpkgs against a lock last modified at 1790000000, with the
+# fake nixpkgs-unstable head at bbbb… and ZEDHA_NOW one day later unless set.
+run_update_nixpkgs() {
+  local name=$1 old_runtime=$2 new_runtime=$3 now=${4:-1790086400}
+  local flake_dir="$test_root/$name"
+  mkdir -p "$flake_dir"
+  write_nix_lock "$flake_dir/flake.lock" 1111111111111111111111111111111111111111
+  python3 - "$flake_dir/flake.lock" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as file: lock = json.load(file)
+lock["nodes"]["nixpkgs"]["locked"]["lastModified"] = 1790000000
+with open(sys.argv[1], "w", encoding="utf-8") as file: json.dump(lock, file)
+PY
+  create_fake_nixpkgs_nix "$test_root/fake-nixpkgs-bin"
+  PATH="$test_root/fake-nixpkgs-bin:$PATH" \
+    ZEDHA_FAKE_LOCK="$flake_dir/flake.lock" \
+    ZEDHA_FAKE_NEW_REV=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    ZEDHA_FAKE_OLD_RUNTIME="$old_runtime" ZEDHA_FAKE_NEW_RUNTIME="$new_runtime" \
+    ZEDHA_NOW="$now" \
+    "$repo_root/scripts/update-nixpkgs" "$flake_dir" > "$flake_dir.out"
+}
+
+assert_nixpkgs_rev() {
+  local name=$1 expected=$2 actual
+  actual=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["nodes"]["nixpkgs"]["locked"]["rev"])' "$test_root/$name/flake.lock")
+  if [[ "$actual" != "$expected" ]]; then
+    echo "expected $name nixpkgs at $expected, got $actual" >&2
+    exit 1
+  fi
+}
+
+test_update_nixpkgs_advances_for_newer_glibc() {
+  run_update_nixpkgs nixpkgs-glibc '{"glibc":"2.44","libstdcxx":"16.2.0"}' '{"glibc":"2.45","libstdcxx":"16.2.0"}'
+  assert_nixpkgs_rev nixpkgs-glibc bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  assert_file_contains "$test_root/nixpkgs-glibc.out" "glibc 2.44 -> 2.45"
+}
+
+test_update_nixpkgs_advances_for_newer_libstdcxx() {
+  run_update_nixpkgs nixpkgs-libstdcxx '{"glibc":"2.44","libstdcxx":"16.2.0"}' '{"glibc":"2.44","libstdcxx":"16.10.0"}'
+  assert_nixpkgs_rev nixpkgs-libstdcxx bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  assert_file_contains "$test_root/nixpkgs-libstdcxx.out" "libstdc++ 16.2.0 -> 16.10.0"
+}
+
+test_update_nixpkgs_advances_stale_lock() {
+  run_update_nixpkgs nixpkgs-stale '{"glibc":"2.44","libstdcxx":"16.2.0"}' '{"glibc":"2.44","libstdcxx":"16.2.0"}' 1791296000
+  assert_nixpkgs_rev nixpkgs-stale bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  assert_file_contains "$test_root/nixpkgs-stale.out" "locked revision is 15 days old"
+}
+
+test_update_nixpkgs_keeps_current_lock() {
+  run_update_nixpkgs nixpkgs-current '{"glibc":"2.44","libstdcxx":"16.2.0"}' '{"glibc":"2.44","libstdcxx":"16.2.0"}'
+  assert_nixpkgs_rev nixpkgs-current aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  assert_file_contains "$test_root/nixpkgs-current.out" "Keeping Nixpkgs aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  if [[ -e "$test_root/nixpkgs-current/.flake.lock.before-nixpkgs" ]]; then
+    echo "expected update-nixpkgs to remove its lock backup" >&2
+    exit 1
+  fi
+}
+
 assert_pin_equals() {
   local path=$1
   local expected_tag=$2
@@ -578,6 +664,8 @@ test_upgrade_workflow_wires_detection_validation_and_pr_creation() {
   assert_file_contains "$workflow" "./scripts/apply-patches"
   assert_file_contains "$workflow" "./scripts/check-identity"
   assert_file_contains "$workflow" "./scripts/sync-nix-pin"
+  assert_file_contains "$workflow" "./scripts/update-nixpkgs"
+  assert_file_contains "$workflow" "Advance Zedha's Nixpkgs"
   assert_file_contains "$workflow" "git add upstream/stable.json flake.lock"
   assert_file_contains "$workflow" "gh pr list"
   assert_file_contains "$workflow" "gh pr create"
@@ -596,6 +684,8 @@ test_upgrade_status_workflow_reports_failed_gates() {
   assert_file_contains "$workflow" "automation/upgrade-zed-latest"
   assert_file_contains "$workflow" "Build Zedha package"
   assert_file_contains "$workflow" "Build Zedha DMG"
+  assert_file_contains "$workflow" 'any(.path == "upstream/stable.json")'
+  assert_file_contains "$workflow" "paths: [upstream/stable.json, flake.lock]"
   assert_file_contains "$workflow" "gh pr merge"
   assert_file_contains "$workflow" "squash"
   assert_file_contains "$workflow" "gh issue create"
@@ -636,6 +726,10 @@ test_check_nix_pin_accepts_match
 test_check_nix_pin_rejects_mismatch
 test_check_nix_pin_rejects_separate_zed_nixpkgs
 test_sync_nix_pin_updates_only_zed
+test_update_nixpkgs_advances_for_newer_glibc
+test_update_nixpkgs_advances_for_newer_libstdcxx
+test_update_nixpkgs_advances_stale_lock
+test_update_nixpkgs_keeps_current_lock
 test_apply_patches_applies_patch_files_in_order
 test_test_script_runs_configured_command_in_source_dir
 test_check_identity_rejects_mismatched_binary_name

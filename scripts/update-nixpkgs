@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Advance Zedha's Nixpkgs when nixpkgs-unstable carries a newer glibc or
+# libstdc++, or when the locked revision is older than the maximum age.
+# zedha.cachix.org only serves builds against this lock, and a host whose
+# graphics driver needs a newer glibc or libstdc++ cannot load it into Zedha.
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+flake_dir=${1:-"$repo_root"}
+max_age_days=${ZEDHA_NIXPKGS_MAX_AGE_DAYS:-14}
+
+python3 - "$flake_dir" "$max_age_days" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+flake_dir = Path(sys.argv[1])
+max_age_days = int(sys.argv[2])
+lock_path = flake_dir / "flake.lock"
+now = int(os.environ.get("ZEDHA_NOW", time.time()))
+
+
+def nixpkgs_node():
+    with lock_path.open(encoding="utf-8") as file:
+        lock = json.load(file)
+    node = lock["nodes"][lock["root"]]["inputs"]["nixpkgs"]
+    return lock["nodes"][node]["locked"]
+
+
+def runtime(rev):
+    result = subprocess.run(
+        [
+            "nix", "eval", "--json",
+            f"github:NixOS/nixpkgs/{rev}#legacyPackages.x86_64-linux",
+            "--apply", "p: { glibc = p.glibc.version; libstdcxx = p.stdenv.cc.cc.version; }",
+        ],
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    )
+    return json.loads(result.stdout)
+
+
+def version_key(version):
+    return tuple(int(part) for part in re.findall(r"\d+", version))
+
+
+old = nixpkgs_node()
+backup = lock_path.with_name(".flake.lock.before-nixpkgs")
+shutil.copyfile(lock_path, backup)
+advanced = False
+try:
+    subprocess.run(["nix", "flake", "update", "nixpkgs", "--flake", str(flake_dir)], check=True)
+    new = nixpkgs_node()
+    if new["rev"] == old["rev"]:
+        print(f"Nixpkgs is already at the latest nixpkgs-unstable ({old['rev']})")
+        raise SystemExit(0)
+
+    old_runtime, new_runtime = runtime(old["rev"]), runtime(new["rev"])
+    reasons = [
+        f"{label} {old_runtime[name]} -> {new_runtime[name]}"
+        for name, label in (("glibc", "glibc"), ("libstdcxx", "libstdc++"))
+        if version_key(new_runtime[name]) > version_key(old_runtime[name])
+    ]
+    age_days = (now - old["lastModified"]) // 86400
+    if age_days > max_age_days:
+        reasons.append(f"locked revision is {age_days} days old")
+
+    if not reasons:
+        print(
+            f"Keeping Nixpkgs {old['rev']}: glibc {old_runtime['glibc']} and "
+            f"libstdc++ {old_runtime['libstdcxx']} are current and the revision "
+            f"is {age_days} days old"
+        )
+        raise SystemExit(0)
+
+    advanced = True
+    print(f"Advanced Nixpkgs from {old['rev'][:12]} to {new['rev'][:12]}: {'; '.join(reasons)}")
+finally:
+    if not advanced:
+        shutil.copyfile(backup, lock_path)
+    backup.unlink()
+PY

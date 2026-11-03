@@ -33,22 +33,25 @@ nix build github:rnretirwtsohg/zedha#zedha --accept-flake-config
 ./result/bin/zedha
 ```
 
-For declarative installation, have Zedha follow the host's Nixpkgs input and
-use its package for the host system. Zedha also makes upstream Zed's Nix
-package follow this input, so the editor and the dynamically loaded system
-graphics driver use a compatible runtime:
+For declarative installation, add Zedha as an input and use its package for
+the host system:
 
 ```nix
 {
-  inputs.zedha = {
-    url = "github:rnretirwtsohg/zedha";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
+  inputs.zedha.url = "github:rnretirwtsohg/zedha";
 
   # In a NixOS or Home Manager module with inputs and pkgs in scope:
   home.packages = [ inputs.zedha.packages.${pkgs.system}.zedha ];
 }
 ```
+
+Keep Zedha's own Nixpkgs input: `zedha.cachix.org` only carries builds against
+Zedha's lock, so `inputs.nixpkgs.follows` compiles Zed locally after every host
+Nixpkgs update. Zedha loads the host's graphics driver, so its glibc and
+libstdc++ must be at least as new as the host's. The daily upgrade workflow
+advances Zedha's Nixpkgs whenever `nixpkgs-unstable` ships a newer glibc or
+libstdc++, and at least every 14 days. Upstream Zed's Nix package follows that
+same input.
 
 Trust `https://zedha.cachix.org` with the public key stored in
 `nix/zedha-cachix-public-key` when configuring the cache outside this flake.
@@ -173,6 +176,7 @@ scripts/check-identity            verify patched Zedha product identity
 scripts/check-nix-pin             verify stable.json and flake.lock agree
 scripts/sync-nix-pin              synchronize the locked official Zed input
 scripts/update-upstream-pin       detect newer strict stable upstream tags
+scripts/update-nixpkgs            advance Nixpkgs on runtime drift or age
 scripts/release-metadata          derive release identity from the upstream pin
 scripts/build-macos-artifact      build a macOS DMG into artifacts/
 scripts/test                      run targeted validation
@@ -182,7 +186,7 @@ nix/zedha-cachix-public-key       public binary-cache signing key
 tests/test-scripts.sh             script behavior tests
 .github/workflows/build-linux.yml build and publish the Linux package
 .github/workflows/build-macos.yml build and publish the macOS release
-.github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables
+.github/workflows/upgrade-upstream.yml  opens upgrade PRs for new stables and Nixpkgs
 ```
 
 Current patches:
@@ -193,11 +197,14 @@ Current patches:
 0003-brand-linux-as-zedha.patch Linux CLI and desktop identity
 ```
 
-A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags,
-updates both `upstream/stable.json` and the official Zed revision in
-`flake.lock`, and refreshes one rolling upgrade pull request. GitHub merges it
-automatically only after the launcher tests, Linux package, identity checks,
-and a complete macOS DMG build pass. Failed patch or build gates leave `main`
+A scheduled workflow checks for newer upstream `vMAJOR.MINOR.PATCH` tags and
+for Nixpkgs runtime drift. It updates `upstream/stable.json` and the official
+Zed revision in `flake.lock` for a new stable, advances the Nixpkgs revision in
+`flake.lock` when `scripts/update-nixpkgs` finds a newer glibc or libstdc++ or
+a lock older than 14 days, and refreshes one rolling upgrade pull request.
+GitHub merges it automatically only after the launcher tests, Linux package,
+and identity checks pass, plus a complete macOS DMG build when the Zed pin
+changes. Failed patch or build gates leave `main`
 untouched and open or update one blocker issue. A successful merge publishes
 the Apple Silicon DMG; the Homebrew tap checks for new releases hourly and
 updates its cask.
