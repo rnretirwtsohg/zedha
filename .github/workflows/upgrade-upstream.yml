@@ -25,8 +25,11 @@ jobs:
           token: ${{ secrets.UPGRADE_PR_TOKEN }}
           persist-credentials: false
 
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v17
+
       - name: Detect latest stable Zed
-        id: candidate
+        id: zed
         run: |
           old_tag=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["tag"])')
           old_commit=$(python3 -c 'import json; print(json.load(open("upstream/stable.json"))["commit"])')
@@ -46,16 +49,46 @@ jobs:
             echo "old_commit=$old_commit"
             echo "new_tag=$new_tag"
             echo "new_commit=$new_commit"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Detect Nixpkgs runtime drift
+        id: nixpkgs
+        run: |
+          summary=$(./scripts/update-nixpkgs | tail -n 1)
+          echo "$summary"
+          if git diff --quiet -- flake.lock; then
+            echo "advanced=false" >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "advanced=true"
+              echo "summary=$summary"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Describe candidate
+        id: candidate
+        env:
+          ZED_UPGRADE: ${{ steps.zed.outputs.upgrade }}
+          NIXPKGS_ADVANCED: ${{ steps.nixpkgs.outputs.advanced }}
+          NEW_TAG: ${{ steps.zed.outputs.new_tag }}
+        run: |
+          if [[ "$ZED_UPGRADE" == true ]]; then
+            title="Upgrade Zedha to Zed $NEW_TAG"
+          elif [[ "$NIXPKGS_ADVANCED" == true ]]; then
+            title="Advance Zedha's Nixpkgs"
+          else
+            echo "upgrade=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "upgrade=true"
+            echo "title=$title"
             echo "branch=automation/upgrade-zed-latest"
           } >> "$GITHUB_OUTPUT"
 
       - name: Fetch candidate Zed
         if: steps.candidate.outputs.upgrade == 'true'
         run: ./scripts/fetch-upstream
-
-      - name: Install Nix
-        if: steps.candidate.outputs.upgrade == 'true'
-        uses: DeterminateSystems/nix-installer-action@v17
 
       - name: Synchronize Nix pin
         if: steps.candidate.outputs.upgrade == 'true'
@@ -76,14 +109,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
           BRANCH: ${{ steps.candidate.outputs.branch }}
-          NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
+          TITLE: ${{ steps.candidate.outputs.title }}
         run: |
           git config user.name "Zedha Upgrade Bot"
           git config user.email "zedha-upgrade-bot@users.noreply.github.com"
           git fetch --no-tags origin "$BRANCH" || true
           git switch -C "$BRANCH"
           git add upstream/stable.json flake.lock
-          git commit -m "Upgrade Zedha to Zed $NEW_TAG"
+          git commit -m "$TITLE"
           gh auth setup-git
           git push --set-upstream --force-with-lease origin "$BRANCH"
 
@@ -92,21 +125,37 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.UPGRADE_PR_TOKEN }}
           BRANCH: ${{ steps.candidate.outputs.branch }}
-          OLD_TAG: ${{ steps.candidate.outputs.old_tag }}
-          OLD_COMMIT: ${{ steps.candidate.outputs.old_commit }}
-          NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
-          NEW_COMMIT: ${{ steps.candidate.outputs.new_commit }}
+          TITLE: ${{ steps.candidate.outputs.title }}
+          ZED_UPGRADE: ${{ steps.zed.outputs.upgrade }}
+          OLD_TAG: ${{ steps.zed.outputs.old_tag }}
+          OLD_COMMIT: ${{ steps.zed.outputs.old_commit }}
+          NEW_TAG: ${{ steps.zed.outputs.new_tag }}
+          NEW_COMMIT: ${{ steps.zed.outputs.new_commit }}
+          NIXPKGS_SUMMARY: ${{ steps.nixpkgs.outputs.summary }}
         run: |
-          cat > "$RUNNER_TEMP/upgrade-pr-body.md" <<EOF
+          body="$RUNNER_TEMP/upgrade-pr-body.md"
+          : > "$body"
+          if [[ "$ZED_UPGRADE" == true ]]; then
+            cat >> "$body" <<EOF
           Upgrade the pinned upstream Zed stable release from $OLD_TAG to
           $NEW_TAG.
 
           Previous commit: $OLD_COMMIT
           New commit: $NEW_COMMIT
 
+          EOF
+          fi
+          if [[ -n "$NIXPKGS_SUMMARY" ]]; then
+            cat >> "$body" <<EOF
+          $NIXPKGS_SUMMARY.
+
+          EOF
+          fi
+          cat >> "$body" <<EOF
           The downstream patches apply cleanly and the identity preflight
           passes. GitHub will merge this pull request automatically after the
-          launcher tests, Linux package, and macOS DMG gates pass.
+          launcher tests and Linux package pass, plus the macOS DMG when the
+          Zed pin changes.
           EOF
 
           pr_number=$(gh pr list \
@@ -120,20 +169,20 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --base main \
               --head "$BRANCH" \
-              --title "Upgrade Zedha to Zed $NEW_TAG" \
-              --body-file "$RUNNER_TEMP/upgrade-pr-body.md")
+              --title "$TITLE" \
+              --body-file "$body")
             pr_number=${pr_url##*/}
           else
             gh pr edit "$pr_number" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Upgrade Zedha to Zed $NEW_TAG" \
-              --body-file "$RUNNER_TEMP/upgrade-pr-body.md"
+              --title "$TITLE" \
+              --body-file "$body"
           fi
       - name: Report blocked upgrade
         if: failure() && steps.candidate.outputs.upgrade == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          NEW_TAG: ${{ steps.candidate.outputs.new_tag }}
+          TITLE: ${{ steps.candidate.outputs.title }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           title="Automated Zed upgrade is blocked"
@@ -143,7 +192,7 @@ jobs:
             --limit 100 \
             --json number,title \
             --jq ".[] | select(.title == \"$title\") | .number" | head -n 1)
-          body="The automated upgrade to ${NEW_TAG:-the latest stable Zed} failed before merge.\n\nRun: $RUN_URL"
+          body="$TITLE failed before merge.\n\nRun: $RUN_URL"
           if [[ -n "$issue_number" ]]; then
             gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body "$body"
           else

@@ -9,7 +9,7 @@ on:
     types: [completed]
   push:
     branches: [main]
-    paths: [upstream/stable.json]
+    paths: [upstream/stable.json, flake.lock]
 
 permissions:
   contents: read
@@ -43,10 +43,19 @@ jobs:
           fi
 
           pr_number=$(jq -r .number <<< "$pr")
-          checks=$(gh pr view "$pr_number" \
+          view=$(gh pr view "$pr_number" \
             --repo "$GITHUB_REPOSITORY" \
-            --json statusCheckRollup \
-            --jq '.statusCheckRollup')
+            --json files,statusCheckRollup)
+          checks=$(jq '.statusCheckRollup' <<< "$view")
+          gates='Test|Script tests
+          Test|Apply patches
+          Test|Targeted Zedha tests
+          Build Linux Package|Build Zedha package'
+          # The DMG builds only when the Zed pin moves; a Nixpkgs-only
+          # upgrade never triggers it.
+          if jq -e '.files | any(.path == "upstream/stable.json")' <<< "$view" > /dev/null; then
+            gates+=$'\nBuild macOS Artifact|Build Zedha DMG'
+          fi
           while IFS='|' read -r workflow check; do
             passed=$(jq \
               --arg workflow "$workflow" \
@@ -61,13 +70,7 @@ jobs:
               echo "Waiting for $workflow / $check"
               exit 0
             fi
-          done <<'EOF'
-          Test|Script tests
-          Test|Apply patches
-          Test|Targeted Zedha tests
-          Build Linux Package|Build Zedha package
-          Build macOS Artifact|Build Zedha DMG
-          EOF
+          done <<< "$gates"
 
           gh pr merge "$pr_number" \
             --repo "$GITHUB_REPOSITORY" \
@@ -121,5 +124,5 @@ jobs:
             gh issue close "$issue_number" \
               --repo "$GITHUB_REPOSITORY" \
               --reason completed \
-              --comment "Resolved by the upstream pin merged in $GITHUB_SHA."
+              --comment "Resolved by the upgrade merged in $GITHUB_SHA."
           fi
